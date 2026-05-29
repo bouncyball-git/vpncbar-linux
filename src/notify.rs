@@ -7,7 +7,7 @@ pub fn notify(summary: &str, body: &str) {
     let _ = Notification::new()
         .summary(summary)
         .body(body)
-        .icon("network-vpn")
+        .icon("io.github.vpncbar")
         .appname("VpncBar")
         .show();
 }

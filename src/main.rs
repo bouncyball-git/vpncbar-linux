@@ -15,6 +15,7 @@ mod privilege;
 mod secrets;
 mod sys;
 mod tray;
+mod tray_icon;
 mod tunnel;
 mod ui;
 

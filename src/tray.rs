@@ -34,12 +34,10 @@ impl ksni::Tray for Tray {
         "VpncBar".into()
     }
 
-    fn icon_name(&self) -> String {
-        if self.connected.is_empty() {
-            "network-vpn-disconnected-symbolic".into()
-        } else {
-            "network-vpn-symbolic".into()
-        }
+    // No icon_name: we ship our own padlock pixmap (icon_pixmap) so the glyph is
+    // identical on every desktop. An empty IconName makes hosts use the pixmap.
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        crate::tray_icon::padlock_set(!self.connected.is_empty())
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
@@ -51,8 +49,8 @@ impl ksni::Tray for Tray {
             } else {
                 format!("{n} tunnel{} up", if n == 1 { "" } else { "s" })
             },
-            icon_name: self.icon_name(),
-            icon_pixmap: vec![],
+            icon_name: String::new(),
+            icon_pixmap: crate::tray_icon::padlock_set(!self.connected.is_empty()),
         }
     }
 

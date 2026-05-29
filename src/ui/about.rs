@@ -23,7 +23,12 @@ pub fn show(parent: &gtk::Window, app: &Rc<App>) {
     vb.set_margin_start(20);
     vb.set_margin_end(20);
 
-    let logo = gtk::Image::from_icon_name("network-vpn");
+    // The closed-lock application icon, rendered from the bundled SVG so it
+    // shows even when running uninstalled (falls back to the themed name).
+    let logo = match crate::tray_icon::closed_lock_texture(64, (0.92, 0.92, 0.92)) {
+        Some(tex) => gtk::Image::from_paintable(Some(&tex)),
+        None => gtk::Image::from_icon_name("io.github.vpncbar"),
+    };
     logo.set_pixel_size(64);
     vb.append(&logo);
 
@@ -115,6 +120,7 @@ fn confirm_uninstall(parent: &gtk::Window, app: &Rc<App>) {
         app.disconnect_all_sync();
         // User-level autostart entry needs no privilege.
         if let Some(cfg) = dirs::config_dir() {
+            let _ = std::fs::remove_file(cfg.join("autostart/io.github.vpncbar.desktop"));
             let _ = std::fs::remove_file(cfg.join("autostart/vpncbar.desktop"));
         }
         // System files: one privileged shell (prompts for admin auth — /bin/sh
@@ -123,7 +129,10 @@ fn confirm_uninstall(parent: &gtk::Window, app: &Rc<App>) {
              /usr/lib/vpncbar/vpncbar-script \
              /usr/lib/vpncbar/vpncbar-disconnect \
              /etc/polkit-1/rules.d/10-vpncbar.rules \
-             /usr/share/applications/vpncbar.desktop; \
+             /usr/share/applications/io.github.vpncbar.desktop \
+             /usr/share/applications/vpncbar.desktop \
+             /usr/share/icons/hicolor/scalable/apps/io.github.vpncbar.svg \
+             /usr/share/icons/hicolor/scalable/apps/vpncbar.svg; \
              rmdir /usr/lib/vpncbar 2>/dev/null; exit 0";
         let r = crate::privilege::run_root("/bin/sh", &["-c", script], None);
         if r.ok() {

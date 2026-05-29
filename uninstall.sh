@@ -10,9 +10,14 @@ sudo rm -f \
     "$PREFIX/lib/vpncbar/vpncbar-script" \
     "$PREFIX/lib/vpncbar/vpncbar-disconnect" \
     /etc/polkit-1/rules.d/10-vpncbar.rules \
-    "$PREFIX/share/applications/vpncbar.desktop"
+    "$PREFIX/share/applications/io.github.vpncbar.desktop" \
+    "$PREFIX/share/applications/vpncbar.desktop" \
+    "$PREFIX/share/icons/hicolor/scalable/apps/io.github.vpncbar.svg" \
+    "$PREFIX/share/icons/hicolor/scalable/apps/vpncbar.svg"
 sudo rmdir "$PREFIX/lib/vpncbar" 2>/dev/null || true
-rm -f ~/.config/autostart/vpncbar.desktop 2>/dev/null || true
+rm -f ~/.config/autostart/io.github.vpncbar.desktop ~/.config/autostart/vpncbar.desktop 2>/dev/null || true
+sudo gtk-update-icon-cache -qtf "$PREFIX/share/icons/hicolor" 2>/dev/null || true
+kbuildsycoca6 >/dev/null 2>&1 || kbuildsycoca5 >/dev/null 2>&1 || true
 
 echo "==> Leaving the 'vpncbar' group in place (remove manually if desired:"
 echo "    sudo gpasswd -d \$USER vpncbar ; sudo groupdel vpncbar )"
