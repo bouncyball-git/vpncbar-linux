@@ -1,0 +1,46 @@
+#!/bin/sh
+# vpncbar-disconnect — validated teardown helper, run as root via pkexec.
+#
+# Sends SIGTERM to a vpnc/openconnect daemon (identified by pid or pidfile),
+# but ONLY after confirming the target really is one of those — so the
+# passwordless polkit rule can't be abused to signal arbitrary processes.
+# The daemon runs its own vpnc-script teardown on SIGTERM (restoring DNS/routes).
+#
+# Usage:  vpncbar-disconnect <pid> | <pidfile> | sweep
+
+kill_one() {
+    pid="$1"
+    [ -n "$pid" ] || return 1
+    comm=$(cat "/proc/$pid/comm" 2>/dev/null) || return 1
+    case "$comm" in
+        vpnc | openconnect)
+            kill -TERM "$pid"
+            ;;
+        *)
+            echo "vpncbar-disconnect: refusing — pid $pid is '$comm', not vpnc/openconnect" >&2
+            return 1
+            ;;
+    esac
+}
+
+target="$1"
+case "$target" in
+    sweep)
+        # Drop stale info files for tunnels whose daemon is gone. The kernel
+        # reaps a dead tunnel's interface/routes, and systemd-resolved drops the
+        # link's DNS, so there's nothing else to clean.
+        for f in /run/vpncbar/*.info; do
+            [ -e "$f" ] || continue
+            dev=$(sed -n 's/^TUNDEV=//p' "$f")
+            [ -n "$dev" ] && [ ! -d "/sys/class/net/$dev" ] && rm -f "$f"
+        done
+        exit 0
+        ;;
+    "" | *[!0-9]*)
+        # Non-numeric: treat as a pidfile path.
+        [ -f "$target" ] && kill_one "$(cat "$target" 2>/dev/null)"
+        ;;
+    *)
+        kill_one "$target"
+        ;;
+esac

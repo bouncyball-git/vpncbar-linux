@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=VpncBar
+GenericName=VPN tray
+Comment=Tray front-end for vpnc (Cisco IPSec) and openconnect (AnyConnect SSL)
+Exec=vpncbar
+Icon=network-vpn
+Terminal=false
+Categories=Network;
+Keywords=VPN;vpnc;openconnect;AnyConnect;Cisco;IPSec;
+StartupNotify=false

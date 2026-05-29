@@ -1,0 +1,59 @@
+#!/bin/sh
+# vpncbar-script — wraps the distro vpnc-script for VpncBar.
+#
+#   1. Records per-tunnel state to /run/vpncbar/<VPNPID>.info so the app's Info
+#      tab can show interface/IP/DNS/routes (the script is the only thing that
+#      knows these at connect time).
+#   2. Folds VpncBar's scoped-DNS match domains (VPNC_MATCH_DOMAINS) into the
+#      split-DNS the system script configures, so VPN DNS stays scoped to those
+#      domains instead of taking over the global resolver.
+#
+# VPNPID / VPNC_MATCH_DOMAINS are passed by VpncBar as a shell prefix on the
+# vpnc "Script" / openconnect "--script" value. Everything else is the standard
+# vpnc-script environment. Used by BOTH vpnc and openconnect.
+
+SYS_SCRIPT="${VPNCBAR_SYS_SCRIPT:-/etc/vpnc/vpnc-script}"
+INFO_DIR=/run/vpncbar
+ID="${VPNPID:-unknown}"
+INFO="$INFO_DIR/$ID.info"
+
+case "$reason" in
+    connect|reconnect)
+        mkdir -p "$INFO_DIR"
+        {
+            echo "TUNDEV=$TUNDEV"
+            echo "INTERNAL_IP4_ADDRESS=$INTERNAL_IP4_ADDRESS"
+            echo "INTERNAL_IP4_DNS=$INTERNAL_IP4_DNS"
+            echo "VPNGATEWAY=$VPNGATEWAY"
+            echo "CISCO_DEF_DOMAIN=$CISCO_DEF_DOMAIN"
+            echo "CISCO_SPLIT_DNS=$CISCO_SPLIT_DNS"
+            echo "VPNC_MATCH_DOMAINS=$VPNC_MATCH_DOMAINS"
+            n="${CISCO_SPLIT_INC:-0}"
+            i=0
+            while [ "$i" -lt "$n" ]; do
+                eval addr="\$CISCO_SPLIT_INC_${i}_ADDR"
+                eval mlen="\$CISCO_SPLIT_INC_${i}_MASKLEN"
+                [ -n "$addr" ] && echo "ROUTE=$addr/$mlen"
+                i=$((i + 1))
+            done
+        } >"$INFO" 2>/dev/null
+        ;;
+    disconnect)
+        rm -f "$INFO" 2>/dev/null
+        ;;
+esac
+
+# Scope the VPN's DNS to our match domains (plus whatever the gateway pushed),
+# by adding them to CISCO_SPLIT_DNS — the system script registers those as the
+# domains the tunnel's resolver is consulted for.
+if [ -n "$VPNC_MATCH_DOMAINS" ]; then
+    extra=$(echo "$VPNC_MATCH_DOMAINS" | tr ' ' ',')
+    if [ -n "$CISCO_SPLIT_DNS" ]; then
+        CISCO_SPLIT_DNS="$CISCO_SPLIT_DNS,$extra"
+    else
+        CISCO_SPLIT_DNS="$extra"
+    fi
+    export CISCO_SPLIT_DNS
+fi
+
+exec "$SYS_SCRIPT"

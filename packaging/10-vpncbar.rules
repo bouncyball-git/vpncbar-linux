@@ -1,0 +1,16 @@
+// VpncBar: allow members of the "vpncbar" group to run vpnc / openconnect and
+// the vpncbar-disconnect helper as root without a password prompt — the Linux
+// analogue of the macOS NOPASSWD sudoers rule. Scoped to exactly these three
+// programs; everything else still authenticates normally.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.policykit.exec" &&
+        subject.isInGroup("vpncbar")) {
+        var prog = action.lookup("program");
+        if (prog == "/usr/bin/vpnc" ||
+            prog == "/usr/bin/openconnect" ||
+            prog == "/usr/local/bin/openconnect" ||
+            prog == "/usr/lib/vpncbar/vpncbar-disconnect") {
+            return polkit.Result.YES;
+        }
+    }
+});
