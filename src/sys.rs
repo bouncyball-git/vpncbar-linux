@@ -1,8 +1,10 @@
 //! Small process/shell helpers — the Linux analogue of the macOS app's `run()`.
 
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::ToSocketAddrs;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
@@ -102,6 +104,76 @@ pub fn run(program: &str, args: &[&str], stdin: Option<&str>) -> Output {
             err: e.to_string(),
         },
     }
+}
+
+/// Like `run`, but the child's stdout+stderr go to `log` (truncated first)
+/// instead of pipes. Because the open file descriptor is inherited across the
+/// daemon's fork, vpnc/openconnect keep writing the *live* session to it after
+/// they background — the Linux stand-in for the macOS vendored `--log-file`,
+/// so the Debug tab tails the whole session rather than just the handshake.
+/// The captured text is read back into `out` (after the foreground process
+/// exits) for error reporting.
+pub fn run_to_file(program: &str, args: &[&str], stdin: Option<&str>, log: &Path) -> Output {
+    let file = match OpenOptions::new().create(true).write(true).truncate(true).open(log) {
+        Ok(f) => f,
+        Err(e) => {
+            return Output {
+                status: -1,
+                out: String::new(),
+                err: format!("cannot open log {}: {e}", log.display()),
+            }
+        }
+    };
+    let (out_f, err_f) = match (file.try_clone(), file.try_clone()) {
+        (Ok(a), Ok(b)) => (a, b),
+        _ => {
+            return Output { status: -1, out: String::new(), err: "cannot dup log fd".into() }
+        }
+    };
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .stdout(Stdio::from(out_f))
+        .stderr(Stdio::from(err_f))
+        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() });
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return Output { status: -1, out: String::new(), err: format!("failed to launch {program}: {e}") }
+        }
+    };
+    if let Some(data) = stdin {
+        if let Some(mut si) = child.stdin.take() {
+            let _ = si.write_all(data.as_bytes());
+        }
+    }
+    let status = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+    // Read back what was written before the foreground process exited (the
+    // handshake / any error) so the caller can surface it.
+    let out = std::fs::read_to_string(log).unwrap_or_default();
+    Output { status, out, err: String::new() }
+}
+
+/// Whether the installed vpnc was built with X.509 (cert/hybrid) support. Stock
+/// builds are PSK + XAUTH only; cert auth needs GnuTLS. We look for it in the
+/// binary's shared-library dependencies — the Linux analogue of the macOS
+/// `otool -L` check. Cached.
+pub fn vpnc_supports_certs() -> bool {
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        let r = run("/usr/bin/ldd", &[VPNC], None);
+        format!("{}{}", r.out, r.err).to_lowercase().contains("gnutls")
+    })
+}
+
+/// First non-empty line of `<bin> --version` (stdout, falling back to stderr).
+/// None if the binary is absent.
+pub fn tool_version(bin: &str) -> Option<String> {
+    if !Path::new(bin).exists() {
+        return None;
+    }
+    let r = run(bin, &["--version"], None);
+    let text = if r.out.trim().is_empty() { r.err } else { r.out };
+    text.lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_string)
 }
 
 /// Resolve a hostname to an IPv4 literal so the gateway never depends on DNS

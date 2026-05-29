@@ -11,7 +11,8 @@
 //! resets the environment, but we pass the script's env vars as a shell prefix
 //! on the "Script"/"--script" value (run via /bin/sh), not via the environment.
 
-use crate::sys::{run, Output, PKEXEC};
+use crate::sys::{run, run_to_file, Output, PKEXEC};
+use std::path::Path;
 
 /// Run `program args…` as root via pkexec, optionally feeding `stdin`.
 pub fn run_root(program: &str, args: &[&str], stdin: Option<&str>) -> Output {
@@ -19,6 +20,16 @@ pub fn run_root(program: &str, args: &[&str], stdin: Option<&str>) -> Output {
     argv.push(program);
     argv.extend_from_slice(args);
     run(PKEXEC, &argv, stdin)
+}
+
+/// Like `run_root`, but the target's stdout+stderr are redirected to `log`. The
+/// fd is inherited across vpnc/openconnect's daemonising fork, so the live
+/// session keeps landing in the log file (see `sys::run_to_file`).
+pub fn run_root_to_file(program: &str, args: &[&str], stdin: Option<&str>, log: &Path) -> Output {
+    let mut argv: Vec<&str> = Vec::with_capacity(args.len() + 1);
+    argv.push(program);
+    argv.extend_from_slice(args);
+    run_to_file(PKEXEC, &argv, stdin, log)
 }
 
 /// True if the failure looks like the user dismissed/failed the polkit auth.

@@ -76,18 +76,14 @@ pub fn connect(p: &Profile, otp: Option<&str>) -> ActionResult {
     }
 
     let log = log_file(p);
-    let _ = std::fs::remove_file(&log);
 
     // openconnect reads one value per form prompt from stdin: password, then
-    // (for 2FA groups) the one-time code. It backgrounds after authenticating.
+    // (for 2FA groups) the one-time code. It backgrounds after authenticating;
+    // redirecting stdout/stderr to the log (the fd is inherited across the
+    // --background fork) gives the Debug tab the whole live session.
     let args = build_args(p);
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-    let r = privilege::run_root(argv[0], &argv[1..], Some(&input));
-
-    let captured = format!("{}{}", r.out, r.err);
-    if !captured.is_empty() {
-        let _ = std::fs::write(&log, &captured);
-    }
+    let r = privilege::run_root_to_file(argv[0], &argv[1..], Some(&input), &log);
 
     if r.ok() {
         return ActionResult::Ok;
@@ -98,7 +94,7 @@ pub fn connect(p: &Profile, otp: Option<&str>) -> ActionResult {
     ActionResult::Message(format!(
         "openconnect failed (status {}):\n{}",
         r.status,
-        tail_chars(&captured, 600)
+        tail_chars(&r.out, 600)
     ))
 }
 

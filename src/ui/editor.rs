@@ -17,9 +17,37 @@ use gtk::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// Open the editor for an existing profile, or a new one (`None`).
+thread_local! {
+    /// One editor window per profile (keyed by uuid; new profiles share the
+    /// "__new__" slot), so re-opening an editor just brings it forward instead
+    /// of spawning a duplicate. Mirrors the macOS per-uuid editor registry.
+    static OPEN_EDITORS: RefCell<std::collections::HashMap<String, gtk::Window>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// Open the editor for an existing profile, or a new one (`None`). If an editor
+/// for the same profile is already open, it's presented rather than duplicated.
 pub fn open_editor(app: &Rc<App>, parent: &gtk::Window, profile: Option<Profile>) {
-    Editor::new(app, parent, profile).present();
+    let key = profile
+        .as_ref()
+        .and_then(|p| p.uuid.clone())
+        .unwrap_or_else(|| "__new__".to_string());
+
+    if let Some(win) = OPEN_EDITORS.with(|m| m.borrow().get(&key).cloned()) {
+        win.present();
+        return;
+    }
+
+    let ed = Editor::new(app, parent, profile);
+    OPEN_EDITORS.with(|m| m.borrow_mut().insert(key.clone(), ed.window.clone()));
+    // Drop the registry entry when the window closes so it can be reopened.
+    ed.window.connect_close_request(move |_| {
+        OPEN_EDITORS.with(|m| {
+            m.borrow_mut().remove(&key);
+        });
+        glib::Propagation::Proceed
+    });
+    ed.present();
 }
 
 /// Holds every input widget so Save can read them back.
@@ -35,11 +63,13 @@ struct Fields {
     id: gtk::Entry,
     secret: gtk::PasswordEntry,
     authmode: gtk::ComboBoxText,
+    /// Shown when cert/hybrid is chosen on a vpnc built without GnuTLS.
+    auth_note: gtk::Label,
     ca_file: gtk::Entry,
-    dh_group: gtk::Entry,
-    pfs: gtk::Entry,
-    nat_mode: gtk::Entry,
-    vendor: gtk::Entry,
+    dh_group: gtk::ComboBoxText,
+    pfs: gtk::ComboBoxText,
+    nat_mode: gtk::ComboBoxText,
+    vendor: gtk::ComboBoxText,
     mtu: gtk::Entry,
     dpd_timeout: gtk::Entry,
     debug: gtk::ComboBoxText,
@@ -73,6 +103,11 @@ struct Editor {
     connect_btn: gtk::Button,
     /// openconnect group -> needs-2FA, from the last Fetch groups probe.
     groups: RefCell<std::collections::HashMap<String, bool>>,
+    /// In-flight connect/disconnect: (target_connected, started). Drives the
+    /// Info tab's transient "Connecting…/Disconnecting…" status (20s deadline),
+    /// mirroring the macOS editor so the status doesn't flicker through the
+    /// stale state. Cleared once the real state reaches the target or times out.
+    transition: RefCell<Option<(bool, std::time::Instant)>>,
 }
 
 fn entry(text: Option<&str>, placeholder: &str) -> gtk::Entry {
@@ -93,6 +128,21 @@ fn combo(items: &[(&str, &str)], active: Option<&str>) -> gtk::ComboBoxText {
         c.append(Some(id), label);
     }
     c.set_active_id(active.or(items.first().map(|(id, _)| *id)));
+    c
+}
+
+/// A dropdown whose first entry is an empty "(default)" choice, so leaving it
+/// alone omits the directive (matching the free-text "blank = backend default"
+/// behaviour) while still offering the valid values. `active` selects an
+/// existing value, else "(default)".
+fn combo_default(items: &[&str], active: Option<&str>) -> gtk::ComboBoxText {
+    let c = gtk::ComboBoxText::new();
+    c.append(Some(""), "(default)");
+    for it in items {
+        c.append(Some(it), it);
+    }
+    c.set_active_id(active.filter(|s| !s.is_empty()).or(Some("")));
+    c.set_hexpand(true);
     c
 }
 
@@ -181,11 +231,25 @@ impl Editor {
                 &[("psk", "psk"), ("hybrid", "hybrid"), ("cert", "cert")],
                 p.authmode.as_deref().or(Some("psk")),
             ),
+            auth_note: {
+                let l = gtk::Label::new(None);
+                l.set_xalign(0.0);
+                l.set_wrap(true);
+                l.add_css_class("dim-label");
+                l.set_visible(false);
+                l
+            },
             ca_file: entry(p.ca_file.as_deref(), "CA file (cert/hybrid)"),
-            dh_group: entry(p.dh_group.as_deref(), "dh2 (default)"),
-            pfs: entry(p.pfs.as_deref(), "server (default)"),
-            nat_mode: entry(p.nat_mode.as_deref(), "natt (default)"),
-            vendor: entry(p.vendor.as_deref(), "cisco (default)"),
+            dh_group: combo_default(
+                &["dh1", "dh2", "dh5", "dh14", "dh15", "dh16", "dh17", "dh18"],
+                p.dh_group.as_deref(),
+            ),
+            pfs: combo_default(
+                &["nopfs", "dh1", "dh2", "dh5", "dh14", "dh15", "dh16", "dh17", "dh18", "server"],
+                p.pfs.as_deref(),
+            ),
+            nat_mode: combo_default(&["natt", "none", "force-natt", "cisco-udp"], p.nat_mode.as_deref()),
+            vendor: combo_default(&["cisco", "netscreen", "fortigate"], p.vendor.as_deref()),
             mtu: entry(p.mtu.as_deref(), "auto"),
             dpd_timeout: entry(p.dpd_timeout.as_deref(), "30"),
             debug: combo(
@@ -281,6 +345,7 @@ impl Editor {
             fields,
             connect_btn: connect_btn.clone(),
             groups: RefCell::new(std::collections::HashMap::new()),
+            transition: RefCell::new(None),
         });
 
         // Rebuild pages when the type changes (new profiles only).
@@ -291,7 +356,13 @@ impl Editor {
                 let kind = c.active_id().map(|s| s.to_string()).unwrap_or_else(|| "vpnc".into());
                 ed.profile.borrow_mut().kind = Some(kind.clone());
                 build_pages(&notebook, &kind, &ed.fields);
+                ed.apply_authmode();
             });
+        }
+        // Gray out credential fields that don't apply to the chosen IKE Authmode.
+        {
+            let ed = ed.clone();
+            ed.clone().fields.authmode.connect_changed(move |_| ed.apply_authmode());
         }
         {
             let ed = ed.clone();
@@ -300,8 +371,9 @@ impl Editor {
         {
             let ed = ed.clone();
             save.connect_clicked(move |_| {
-                ed.save();
-                ed.window.close();
+                if ed.save() {
+                    ed.window.close();
+                }
             });
         }
         {
@@ -343,9 +415,54 @@ impl Editor {
             });
         }
 
+        // Return = Save (default widget), Esc = Cancel/close.
+        window.set_default_widget(Some(&save));
+        {
+            let key = gtk::EventControllerKey::new();
+            let ed = ed.clone();
+            key.connect_key_pressed(move |_, keyval, _, _| {
+                if keyval == gtk::gdk::Key::Escape {
+                    ed.window.close();
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
+                }
+            });
+            window.add_controller(key);
+        }
+
+        ed.apply_authmode();
         ed.refresh_connect_button();
         ed.update_info_debug();
         ed
+    }
+
+    /// Enable only the credential fields that apply to the current backend /
+    /// IKE Authmode, fading the rest — and warn if cert/hybrid is picked on a
+    /// vpnc without GnuTLS. Mirrors the macOS `authModeChanged`.
+    fn apply_authmode(&self) {
+        let f = &self.fields;
+        if self.is_oc() {
+            f.secret.set_sensitive(true);
+            f.ca_file.set_sensitive(true);
+            f.client_cert.set_sensitive(true);
+            f.auth_note.set_visible(false);
+            return;
+        }
+        let mode = f.authmode.active_id().map(|s| s.to_string()).unwrap_or_else(|| "psk".into());
+        let (is_cert, is_hybrid) = (mode == "cert", mode == "hybrid");
+        f.secret.set_sensitive(mode == "psk");
+        f.ca_file.set_sensitive(is_cert || is_hybrid);
+        f.client_cert.set_sensitive(is_cert);
+        if (is_cert || is_hybrid) && !crate::sys::vpnc_supports_certs() {
+            f.auth_note.set_text(&format!(
+                "This vpnc build has no certificate support (not linked against GnuTLS), \
+                 so “{mode}” mode won’t take effect. Rebuild vpnc with GnuTLS to use it."
+            ));
+            f.auth_note.set_visible(true);
+        } else {
+            f.auth_note.set_visible(false);
+        }
     }
 
     /// Probe the gateway for its group list (off the main thread) and populate
@@ -397,12 +514,38 @@ impl Editor {
         let p = self.profile.borrow().clone();
         // Info: live tunnel state (only meaningful when connected).
         let connected = p.uuid.is_some() && is_connected(&p);
+
+        // Resolve any in-flight Connecting…/Disconnecting… transition: keep it
+        // until the real state reaches the target or the 20s deadline lapses.
+        let transient = {
+            let mut tr = self.transition.borrow_mut();
+            match *tr {
+                Some((target, started)) if connected != target && started.elapsed().as_secs() < 20 => {
+                    Some(if target { "Connecting…" } else { "Disconnecting…" })
+                }
+                Some(_) => {
+                    *tr = None;
+                    None
+                }
+                None => None,
+            }
+        };
+
+        let conn = self.app.connected();
+        let live = conn.get(&p.name).copied();
         let mut s = String::new();
-        if connected {
+        // Show live details while up (covers Disconnecting…, which keeps the
+        // last-known details), a bare verb while Connecting…, else Not connected.
+        let show_details = connected && transient != Some("Connecting…");
+        match transient {
+            Some(verb) => s.push_str(&format!("Status:        {verb}\n")),
+            None if connected => s.push_str("Status:        Connected\n"),
+            None => s.push_str("Status:        Not connected\n"),
+        }
+        if show_details {
             let t = crate::tunnel::read_tunnel_info(&p);
-            let conn = self.app.connected();
-            let secs = conn.get(&p.name).map(|(_, s)| *s).unwrap_or(0);
-            s.push_str(&format!("Status:        Connected\nUptime:        {}\n", crate::tunnel::format_elapsed(secs)));
+            let secs = live.map(|(_, s)| s).unwrap_or(0);
+            s.push_str(&format!("Uptime:        {}\n", crate::tunnel::format_elapsed(secs)));
             if let Some(i) = &t.iface {
                 s.push_str(&format!("Interface:     {i}\n"));
                 if let Some(c) = crate::tunnel::interface_counters(i) {
@@ -418,10 +561,11 @@ impl Editor {
             if let Some(v) = &t.dns { s.push_str(&format!("DNS:           {v}\n")); }
             if let Some(v) = &t.match_domains { s.push_str(&format!("Match domains: {v}\n")); }
             if !t.routes.is_empty() { s.push_str(&format!("Routes:        {}\n", t.routes.join(", "))); }
-        } else {
-            s.push_str("Status:        Not connected\n");
         }
-        s.push_str(&format!("\nCommand:\n{}\n", crate::backend::command_line(&p)));
+        match live {
+            Some((pid, _)) => s.push_str(&format!("\nCommand (PID {pid}):\n{}\n", crate::backend::command_line(&p))),
+            None => s.push_str(&format!("\nCommand:\n{}\n", crate::backend::command_line(&p))),
+        }
         self.fields.info_label.set_text(&s);
 
         // Debug: tail of the per-session log.
@@ -462,20 +606,55 @@ impl Editor {
     }
 
     fn toggle_connection(&self) {
-        // Persist first so we connect what's on screen.
-        self.save();
+        // Persist first so we connect what's on screen (and validate).
+        if !self.save() {
+            return;
+        }
         let p = self.profile.borrow().clone();
-        let cmd = if is_connected(&p) {
+        let connected = is_connected(&p);
+        let cmd = if connected {
             Cmd::Disconnect(p.name.clone())
         } else {
             Cmd::Connect(p.name.clone())
         };
+        // Note the in-flight direction so the Info tab shows Connecting…/Disconnecting…
+        *self.transition.borrow_mut() = Some((!connected, std::time::Instant::now()));
         let _ = self.app.sender().send_blocking(cmd);
         self.refresh_connect_button();
+        self.update_info_debug();
+    }
+
+    /// Required fields per backend — `Some(list)` names the missing ones.
+    fn missing_required(&self) -> Option<String> {
+        let f = &self.fields;
+        let mut missing = Vec::new();
+        if f.name.text().trim().is_empty() {
+            missing.push("Name");
+        }
+        if f.gateway.text().trim().is_empty() {
+            missing.push("Gateway");
+        }
+        if f.username.text().trim().is_empty() {
+            missing.push("Username");
+        }
+        if !self.is_oc() && f.id.text().trim().is_empty() {
+            missing.push("Group name");
+        }
+        (!missing.is_empty()).then(|| missing.join(", "))
     }
 
     /// Gather the form into a Profile, persist it + secrets, and refresh the UI.
-    fn save(&self) {
+    /// Returns false (without saving) if required fields are missing.
+    fn save(&self) -> bool {
+        if let Some(missing) = self.missing_required() {
+            gtk::AlertDialog::builder()
+                .message("Missing required fields")
+                .detail(format!("Please fill in: {missing}."))
+                .modal(true)
+                .build()
+                .show(Some(&self.window));
+            return false;
+        }
         let f = &self.fields;
         let mut p = self.profile.borrow().clone();
         let kind = if f_is_oc(&p) { "openconnect" } else { "vpnc" };
@@ -491,10 +670,10 @@ impl Editor {
             p.id = f.id.text().trim().to_string();
             p.authmode = f.authmode.active_id().map(|s| s.to_string());
             p.ca_file = ne(Some(&f.ca_file.text()));
-            p.dh_group = ne(Some(&f.dh_group.text()));
-            p.pfs = ne(Some(&f.pfs.text()));
-            p.nat_mode = ne(Some(&f.nat_mode.text()));
-            p.vendor = ne(Some(&f.vendor.text()));
+            p.dh_group = ne(f.dh_group.active_id().as_deref());
+            p.pfs = ne(f.pfs.active_id().as_deref());
+            p.nat_mode = ne(f.nat_mode.active_id().as_deref());
+            p.vendor = ne(f.vendor.active_id().as_deref());
             p.mtu = ne(Some(&f.mtu.text()));
             p.dpd_timeout = ne(Some(&f.dpd_timeout.text()));
             p.debug = f.debug.active_id().map(|s| s.to_string());
@@ -528,6 +707,7 @@ impl Editor {
         *self.profile.borrow_mut() = saved;
 
         let _ = self.app.sender().send_blocking(Cmd::Refresh);
+        true
     }
 }
 
@@ -542,18 +722,18 @@ fn build_pages(notebook: &gtk::Notebook, kind: &str, f: &Fields) {
     }
     // Detach every reused widget from its old page before re-attaching, so a
     // Type switch can't trip "widget already has a parent".
-    let widgets: [&gtk::Widget; 31] = [
+    let widgets: [&gtk::Widget; 32] = [
         f.name.upcast_ref(), f.gateway.upcast_ref(), f.username.upcast_ref(),
         f.password.upcast_ref(), f.domains.upcast_ref(), f.client_cert.upcast_ref(),
         f.id.upcast_ref(), f.secret.upcast_ref(), f.authmode.upcast_ref(),
-        f.ca_file.upcast_ref(), f.dh_group.upcast_ref(), f.pfs.upcast_ref(),
-        f.nat_mode.upcast_ref(), f.vendor.upcast_ref(), f.mtu.upcast_ref(),
-        f.dpd_timeout.upcast_ref(), f.debug.upcast_ref(), f.enable_weak.upcast_ref(),
-        f.single_des.upcast_ref(), f.no_encryption.upcast_ref(), f.weak_auth.upcast_ref(),
-        f.oc_authgroup.upcast_ref(), f.oc_fetch.upcast_ref(), f.oc_server_cert.upcast_ref(),
-        f.oc_otp.upcast_ref(), f.oc_protocol.upcast_ref(), f.oc_no_dtls.upcast_ref(),
-        f.oc_dpd.upcast_ref(), f.oc_mtu.upcast_ref(), f.oc_reconnect.upcast_ref(),
-        f.oc_debug.upcast_ref(),
+        f.auth_note.upcast_ref(), f.ca_file.upcast_ref(), f.dh_group.upcast_ref(),
+        f.pfs.upcast_ref(), f.nat_mode.upcast_ref(), f.vendor.upcast_ref(),
+        f.mtu.upcast_ref(), f.dpd_timeout.upcast_ref(), f.debug.upcast_ref(),
+        f.enable_weak.upcast_ref(), f.single_des.upcast_ref(), f.no_encryption.upcast_ref(),
+        f.weak_auth.upcast_ref(), f.oc_authgroup.upcast_ref(), f.oc_fetch.upcast_ref(),
+        f.oc_server_cert.upcast_ref(), f.oc_otp.upcast_ref(), f.oc_protocol.upcast_ref(),
+        f.oc_no_dtls.upcast_ref(), f.oc_dpd.upcast_ref(), f.oc_mtu.upcast_ref(),
+        f.oc_reconnect.upcast_ref(), f.oc_debug.upcast_ref(),
     ];
     for w in widgets {
         detach(w);
@@ -571,17 +751,25 @@ fn build_pages(notebook: &gtk::Notebook, kind: &str, f: &Fields) {
         group_box.append(&f.oc_fetch);
         add_row(&creds, r, "Auth group", &group_box);
         r += 1;
-        add_row(&creds, r, "Server cert", &f.oc_server_cert);
-        r += 1;
         add_row(&creds, r, "Username", &f.username);
         r += 1;
         add_row(&creds, r, "Password", &f.password);
         r += 1;
         add_row(&creds, r, "VPN domains", &f.domains);
         r += 1;
-        add_row(&creds, r, "Client cert", &f.client_cert);
-        r += 1;
         creds.attach(&f.oc_otp, 1, r, 1, 1);
+        r += 1;
+
+        // Cert fields live behind an "Advanced" disclosure (expanded if set).
+        let adv_grid = form_grid();
+        add_row(&adv_grid, 0, "Server cert", &f.oc_server_cert);
+        add_row(&adv_grid, 1, "Client cert", &f.client_cert);
+        let advanced = gtk::Expander::new(Some("Advanced"));
+        advanced.set_child(Some(&adv_grid));
+        advanced.set_expanded(
+            !f.oc_server_cert.text().is_empty() || !f.client_cert.text().is_empty(),
+        );
+        creds.attach(&advanced, 0, r, 2, 1);
 
         let opts = form_grid();
         let mut o = 0;
@@ -615,6 +803,9 @@ fn build_pages(notebook: &gtk::Notebook, kind: &str, f: &Fields) {
         add_row(&creds, r, "CA file", &f.ca_file);
         r += 1;
         add_row(&creds, r, "Client cert", &f.client_cert);
+        r += 1;
+        // Cert-support warning spans both columns (hidden unless relevant).
+        creds.attach(&f.auth_note, 0, r, 2, 1);
 
         let opts = form_grid();
         let mut o = 0;

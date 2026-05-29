@@ -17,8 +17,11 @@ pub fn build_config(p: &Profile) -> Result<String, ActionResult> {
     let authmode = ne(p.authmode.as_deref()).unwrap_or_else(|| "psk".into());
     let uses_cert = authmode == "cert" || authmode == "hybrid";
 
-    // Username may be "DOMAIN\\user": domain via vpnc's Domain directive.
+    // Username may be "DOMAIN\\user": domain via vpnc's Domain directive. Fall
+    // back to the standalone `domain` field for legacy profiles that stored it
+    // separately.
     let (xauth_domain, xauth_user) = split_domain_user(&p.username);
+    let xauth_domain = xauth_domain.or_else(|| ne(p.domain.as_deref()));
 
     let mut lines = vec![
         format!("IPSec gateway {}", resolve_gateway_ip(&p.gateway)),
@@ -92,26 +95,23 @@ pub fn connect(p: &Profile) -> ActionResult {
         Err(e) => return e,
     };
 
-    // Fresh, user-owned log (the Debug tab tails it).
     let log = log_file(p);
-    let _ = std::fs::remove_file(&log);
-
     let pid = pid_file(p);
     let pid_s = pid.to_string_lossy();
     // vpnc reads its config from stdin ("-"), detaches after the tunnel is up,
     // and writes its pid to --pid-file. We escalate the whole thing via pkexec.
-    let r = privilege::run_root(
+    // Stock vpnc has no --log-file (that was a vendored patch) and reopens its
+    // std fds to /dev/null when it daemonises, so redirecting stdout/stderr to
+    // the per-profile log captures the full connection phase (handshake +
+    // errors) for the Debug tab — the most a non-patched vpnc can give us.
+    // (openconnect, which keeps stderr under --background, logs its whole
+    // session this way.)
+    let r = privilege::run_root_to_file(
         VPNC,
         &["--non-inter", "--pid-file", &pid_s, "-"],
         Some(&config),
+        &log,
     );
-
-    // Stock vpnc has no --log-file, so persist what it printed (handshake/errors)
-    // for the Debug tab.
-    let captured = format!("{}{}", r.out, r.err);
-    if !captured.is_empty() {
-        let _ = std::fs::write(&log, &captured);
-    }
 
     if r.ok() {
         return ActionResult::Ok;
@@ -119,11 +119,8 @@ pub fn connect(p: &Profile) -> ActionResult {
     if was_dismissed(&r) {
         return ActionResult::Message("Authorization was cancelled.".into());
     }
-    let detail = crate::sys::tail_chars(&captured, 600);
-    let detail = if detail.is_empty() {
-        if r.err.is_empty() { r.out.clone() } else { r.err.clone() }
-    } else {
-        detail
-    };
+    // `r.out` holds the log text captured before the foreground process exited.
+    let detail = crate::sys::tail_chars(&r.out, 600);
+    let detail = if detail.is_empty() { r.out.clone() } else { detail };
     ActionResult::Message(format!("vpnc failed (status {}):\n{detail}", r.status))
 }

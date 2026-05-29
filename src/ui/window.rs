@@ -21,6 +21,7 @@ struct LiveRow {
 pub struct MainWindowInner {
     window: gtk::ApplicationWindow,
     list: gtk::ListBox,
+    disc_all: gtk::Button,
     app: Rc<App>,
     live: RefCell<Vec<LiveRow>>,
 }
@@ -80,6 +81,7 @@ impl MainWindow {
         let inner = Rc::new(MainWindowInner {
             window: window.clone(),
             list,
+            disc_all: disc_all.clone(),
             app: app.clone(),
             live: RefCell::new(Vec::new()),
         });
@@ -150,6 +152,9 @@ impl MainWindow {
 
         let profiles = inner.app.profiles();
         let connected = inner.app.connected();
+
+        // "Disconnect All" only when at least one tunnel is up (matches macOS).
+        inner.disc_all.set_visible(!connected.is_empty());
 
         if profiles.is_empty() {
             let row = gtk::ListBoxRow::new();

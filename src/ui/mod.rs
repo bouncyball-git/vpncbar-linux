@@ -22,10 +22,11 @@ pub fn install_hooks(app: &Rc<App>, application: &gtk::Application) {
     let w_refresh = win.clone();
     let w_about = win.clone();
     let w_otp = win.clone();
+    let app_about = app.clone();
 
     app.set_hooks(UiHooks {
         open_window: Some(Box::new(move || w_open.present())),
-        about: Some(Box::new(move || about::show(&w_about.gtk_window()))),
+        about: Some(Box::new(move || about::show(&w_about.gtk_window(), &app_about))),
         request_otp: Some(Box::new(move |p| otp::prompt(&w_otp.gtk_window(), p))),
         on_refresh: Some(Box::new(move || w_refresh.refresh())),
     });

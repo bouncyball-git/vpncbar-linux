@@ -1,16 +1,144 @@
-//! About dialog.
+//! About window — version, backend versions, project link, and an in-app
+//! uninstaller (mirrors the macOS About panel).
 
+use crate::app::App;
+use crate::sys;
 use gtk::prelude::*;
+use std::rc::Rc;
 
-pub fn show(parent: &gtk::Window) {
-    let about = gtk::AboutDialog::builder()
-        .program_name("VpncBar")
-        .version(env!("CARGO_PKG_VERSION"))
-        .comments("A tray front-end for vpnc (Cisco IPSec) and openconnect (AnyConnect SSL).")
-        .license_type(gtk::License::Gpl20)
-        .logo_icon_name("network-vpn")
-        .modal(true)
+const REPO_URL: &str = "https://github.com/bouncyball-git/vpncbar";
+
+pub fn show(parent: &gtk::Window, app: &Rc<App>) {
+    let win = gtk::Window::builder()
+        .title("About VpncBar")
         .transient_for(parent)
+        .modal(true)
+        .resizable(false)
+        .default_width(400)
         .build();
-    about.present();
+
+    let vb = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    vb.set_margin_top(20);
+    vb.set_margin_bottom(16);
+    vb.set_margin_start(20);
+    vb.set_margin_end(20);
+
+    let logo = gtk::Image::from_icon_name("network-vpn");
+    logo.set_pixel_size(64);
+    vb.append(&logo);
+
+    let name = gtk::Label::new(None);
+    name.set_markup("<span size='x-large' weight='bold'>VpncBar</span>");
+    vb.append(&name);
+
+    let ver = gtk::Label::new(Some(&format!("Version {}", env!("CARGO_PKG_VERSION"))));
+    ver.add_css_class("dim-label");
+    vb.append(&ver);
+
+    let desc = gtk::Label::new(Some(
+        "A tray front-end for vpnc (Cisco IPSec) and openconnect (AnyConnect SSL).",
+    ));
+    desc.set_wrap(true);
+    desc.set_justify(gtk::Justification::Center);
+    vb.append(&desc);
+
+    // Backend versions (and licences), matching the macOS About panel.
+    let vpnc_line = sys::tool_version(sys::VPNC)
+        .map(|v| format!("{v} · GPLv2"))
+        .unwrap_or_else(|| "vpnc: not installed".into());
+    let oc_line = match sys::openconnect_path() {
+        Some(p) => sys::tool_version(p)
+            .map(|v| format!("{v} · LGPLv2.1"))
+            .unwrap_or_else(|| "openconnect: installed".into()),
+        None => "openconnect: not installed".into(),
+    };
+    let backends = gtk::Label::new(Some(&format!("{vpnc_line}\n{oc_line}")));
+    backends.add_css_class("dim-label");
+    backends.add_css_class("caption");
+    backends.set_justify(gtk::Justification::Center);
+    vb.append(&backends);
+
+    let link = gtk::LinkButton::with_label(REPO_URL, "github.com/bouncyball-git/vpncbar");
+    vb.append(&link);
+
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    buttons.set_halign(gtk::Align::End);
+    buttons.set_margin_top(8);
+    let uninstall = gtk::Button::with_label("Uninstall VpncBar…");
+    uninstall.add_css_class("destructive-action");
+    let close = gtk::Button::with_label("Close");
+    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    buttons.append(&uninstall);
+    buttons.append(&spacer);
+    buttons.append(&close);
+    vb.append(&buttons);
+
+    win.set_child(Some(&vb));
+
+    {
+        let win = win.clone();
+        close.connect_clicked(move |_| win.close());
+    }
+    {
+        let app = app.clone();
+        let win = win.clone();
+        uninstall.connect_clicked(move |_| confirm_uninstall(&win, &app));
+    }
+
+    win.present();
+}
+
+/// Ask, then disconnect all tunnels and remove the installed files (the system
+/// files via a polkit prompt). Profiles + stored secrets are kept.
+fn confirm_uninstall(parent: &gtk::Window, app: &Rc<App>) {
+    let dialog = gtk::AlertDialog::builder()
+        .message("Uninstall VpncBar?")
+        .detail(
+            "This disconnects all tunnels and removes the installed binary, helper script, \
+             polkit rule and launcher. Your saved profiles and stored secrets are kept.",
+        )
+        .buttons(["Cancel", "Uninstall"])
+        .cancel_button(0)
+        .default_button(0)
+        .modal(true)
+        .build();
+
+    let app = app.clone();
+    let parent_cb = parent.clone();
+    dialog.choose(Some(parent), gtk::gio::Cancellable::NONE, move |res| {
+        let parent = &parent_cb;
+        if res != Ok(1) {
+            return;
+        }
+        // Bring tunnels down while the validated helper is still installed.
+        app.disconnect_all_sync();
+        // User-level autostart entry needs no privilege.
+        if let Some(cfg) = dirs::config_dir() {
+            let _ = std::fs::remove_file(cfg.join("autostart/vpncbar.desktop"));
+        }
+        // System files: one privileged shell (prompts for admin auth — /bin/sh
+        // isn't covered by the passwordless rule, which is intentional).
+        let script = "rm -f /usr/bin/vpncbar \
+             /usr/lib/vpncbar/vpncbar-script \
+             /usr/lib/vpncbar/vpncbar-disconnect \
+             /etc/polkit-1/rules.d/10-vpncbar.rules \
+             /usr/share/applications/vpncbar.desktop; \
+             rmdir /usr/lib/vpncbar 2>/dev/null; exit 0";
+        let r = crate::privilege::run_root("/bin/sh", &["-c", script], None);
+        if r.ok() {
+            std::process::exit(0);
+        }
+        let detail = if crate::privilege::was_dismissed(&r) {
+            "Authorization was cancelled — nothing was removed.".to_string()
+        } else {
+            format!("Removal failed (status {}):\n{}", r.status, if r.err.is_empty() { r.out } else { r.err })
+        };
+        gtk::AlertDialog::builder()
+            .message("Uninstall failed")
+            .detail(detail)
+            .modal(true)
+            .build()
+            .show(Some(parent));
+    });
 }
