@@ -54,9 +54,10 @@ fn run_gui() {
             connected: Default::default(),
             tx: tx.clone(),
         };
-        let service = ksni::TrayService::new(tray);
-        let handle = service.handle();
-        service.spawn();
+        // ksni 0.3: spawn() runs the SNI service on its own thread and hands
+        // back a Handle for `update`. (TrayMethods provides spawn().)
+        use ksni::blocking::TrayMethods;
+        let handle = tray.spawn().expect("failed to start the system tray");
 
         let app = App::new(handle, tx);
         ui::install_hooks(&app, application);

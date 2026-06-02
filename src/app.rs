@@ -43,13 +43,13 @@ pub struct UiHooks {
 
 pub struct App {
     state: RefCell<State>,
-    tray: ksni::Handle<Tray>,
+    tray: ksni::blocking::Handle<Tray>,
     tx: async_channel::Sender<Cmd>,
     hooks: RefCell<UiHooks>,
 }
 
 impl App {
-    pub fn new(tray: ksni::Handle<Tray>, tx: async_channel::Sender<Cmd>) -> Rc<Self> {
+    pub fn new(tray: ksni::blocking::Handle<Tray>, tx: async_channel::Sender<Cmd>) -> Rc<Self> {
         Rc::new(App {
             state: RefCell::new(State {
                 profiles: load_profiles(),

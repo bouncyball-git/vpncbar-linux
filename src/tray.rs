@@ -26,6 +26,11 @@ impl Tray {
 }
 
 impl ksni::Tray for Tray {
+    // Open the menu on the primary (left) click instead of calling `activate`.
+    // Hosts that honour ItemIsMenu will pop the menu for both left and right
+    // click, so the main window is reachable via the "Open VpncBar…" entry.
+    const MENU_ON_ACTIVATE: bool = true;
+
     fn id(&self) -> String {
         "vpncbar".into()
     }
@@ -59,7 +64,8 @@ impl ksni::Tray for Tray {
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
-        // Primary (left) click on the icon opens the main window.
+        // Fallback for hosts that ignore ItemIsMenu and still send Activate on
+        // left click: open the main window (matches the old behaviour).
         Self::send(&self.tx, Cmd::OpenWindow);
     }
 
@@ -69,7 +75,7 @@ impl ksni::Tray for Tray {
         if self.profiles.is_empty() {
             items.push(
                 StandardItem {
-                    label: "No VPNs — use Manage VPNs…".into(),
+                    label: "No VPNs".into(),
                     enabled: false,
                     ..Default::default()
                 }
@@ -116,7 +122,7 @@ impl ksni::Tray for Tray {
         }
         items.push(
             StandardItem {
-                label: "Open VpncBar…".into(),
+                label: "VPN Manager".into(),
                 activate: Box::new(|t: &mut Self| Self::send(&t.tx, Cmd::OpenWindow)),
                 ..Default::default()
             }
@@ -124,7 +130,7 @@ impl ksni::Tray for Tray {
         );
         items.push(
             StandardItem {
-                label: "About VpncBar".into(),
+                label: "About".into(),
                 activate: Box::new(|t: &mut Self| Self::send(&t.tx, Cmd::About)),
                 ..Default::default()
             }
@@ -133,7 +139,7 @@ impl ksni::Tray for Tray {
         items.push(MenuItem::Separator);
         items.push(
             StandardItem {
-                label: "Quit VpncBar".into(),
+                label: "Quit".into(),
                 activate: Box::new(|t: &mut Self| Self::send(&t.tx, Cmd::Quit)),
                 ..Default::default()
             }
