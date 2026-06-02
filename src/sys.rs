@@ -114,6 +114,13 @@ pub fn run(program: &str, args: &[&str], stdin: Option<&str>) -> Output {
 /// The captured text is read back into `out` (after the foreground process
 /// exits) for error reporting.
 pub fn run_to_file(program: &str, args: &[&str], stdin: Option<&str>, log: &Path) -> Output {
+    // The runtime dir (~/.config/vpncbar/run) isn't created on first run, so
+    // create it here — otherwise the open below fails with ENOENT and the
+    // backend never launches (no tunnel, no log). The pid file the child writes
+    // lives in this same dir, so this covers it too.
+    if let Some(parent) = log.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let file = match OpenOptions::new().create(true).write(true).truncate(true).open(log) {
         Ok(f) => f,
         Err(e) => {

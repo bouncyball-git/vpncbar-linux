@@ -47,6 +47,11 @@ fn run_gui() {
     application.connect_activate(|_| {});
 
     application.connect_startup(|application| {
+        // Create the runtime dir (pidfiles + per-session logs) up front, as the
+        // macOS app does at launch. Without it the first connect can't open its
+        // log and the backend never launches.
+        let _ = std::fs::create_dir_all(model::run_dir());
+
         // Build the tray and its command channel.
         let (tx, rx) = async_channel::unbounded::<Cmd>();
         let tray = tray::Tray {
