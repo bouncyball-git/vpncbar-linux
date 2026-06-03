@@ -6,7 +6,7 @@ use crate::sys;
 use gtk::prelude::*;
 use std::rc::Rc;
 
-const REPO_URL: &str = "https://github.com/bouncyball-git/vpncbar";
+const REPO_URL: &str = "https://github.com/bouncyball-git/vpncbar-linux";
 
 pub fn show(parent: &gtk::Window, app: &Rc<App>) {
     let win = gtk::Window::builder()
@@ -63,19 +63,18 @@ pub fn show(parent: &gtk::Window, app: &Rc<App>) {
     backends.set_justify(gtk::Justification::Center);
     vb.append(&backends);
 
-    let link = gtk::LinkButton::with_label(REPO_URL, "github.com/bouncyball-git/vpncbar");
+    let link = gtk::LinkButton::with_label(REPO_URL, "github.com/bouncyball-git/vpncbar-linux");
+    link.set_halign(gtk::Align::Center); // natural width, not stretched across the box
     vb.append(&link);
 
-    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    buttons.set_halign(gtk::Align::End);
+    // Stacked buttons: Close sits under Uninstall (equal width, centred).
+    let buttons = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    buttons.set_halign(gtk::Align::Center);
     buttons.set_margin_top(8);
     let uninstall = gtk::Button::with_label("Uninstall VpncBar…");
-    uninstall.add_css_class("destructive-action");
     let close = gtk::Button::with_label("Close");
-    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    spacer.set_hexpand(true);
+    close.set_halign(gtk::Align::Center); // natural size, don't stretch to Uninstall's width
     buttons.append(&uninstall);
-    buttons.append(&spacer);
     buttons.append(&close);
     vb.append(&buttons);
 
@@ -92,6 +91,9 @@ pub fn show(parent: &gtk::Window, app: &Rc<App>) {
     }
 
     win.present();
+    // The link is the first focusable widget and would grab initial focus,
+    // drawing a focus ring around it. Start with nothing focused instead.
+    gtk::prelude::GtkWindowExt::set_focus(&win, None::<&gtk::Widget>);
 }
 
 /// Ask, then disconnect all tunnels and remove the installed files (the system
