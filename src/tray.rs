@@ -104,12 +104,21 @@ impl ksni::Tray for Tray {
                 .into(),
             );
         } else {
+            // The host renders the popup (we only supply plain-text labels over
+            // DBusMenu) in a proportional font with no column/tab support, so the
+            // elapsed time CANNOT be right-justified: space-padding doesn't equal
+            // equal pixel widths, and a '\t' is shown as plain space on Plasma.
+            // So we don't fake a column — the time goes in parentheses after the
+            // name. MIN_WIDTH is a trailing-pad width floor that keeps the menu
+            // from collapsing narrow (invisible; some hosts may trim it).
+            const MIN_WIDTH: usize = 18;
             for name in &self.profiles {
                 let live = self.connected.get(name).copied();
-                let label = match live {
-                    Some((_, secs)) => format!("✓ {name}    {}", format_elapsed(secs)),
-                    None => format!("    {name}"),
+                let body = match live {
+                    Some((_, secs)) => format!("✓ {name} ({})", format_elapsed(secs)),
+                    None => format!("  {name}"),
                 };
+                let label = format!("{body:<w$}", w = MIN_WIDTH);
                 let n = name.clone();
                 items.push(
                     StandardItem {

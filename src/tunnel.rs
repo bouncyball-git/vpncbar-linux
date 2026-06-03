@@ -86,7 +86,7 @@ fn read_cmdline(pid: u32) -> Option<Vec<String>> {
     )
 }
 
-fn uptime_secs() -> f64 {
+pub fn uptime_secs() -> f64 {
     std::fs::read_to_string("/proc/uptime")
         .ok()
         .and_then(|s| s.split_whitespace().next().map(str::to_string))

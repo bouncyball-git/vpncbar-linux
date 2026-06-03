@@ -11,6 +11,7 @@ mod backend;
 mod config_import;
 mod model;
 mod notify;
+mod pidfd;
 mod privilege;
 mod secrets;
 mod sys;
@@ -96,10 +97,23 @@ fn run_gui() {
             });
         }
 
-        // Poll tunnel state periodically (live timers + drop detection).
+        // Live timer redraw: 1s, local-only (recomputes elapsed from cached
+        // start times, no /proc scan). Drop detection is event-driven via pidfd
+        // watches armed in refresh(), so this tick does no process scanning.
         {
             let app = app.clone();
-            glib::timeout_add_seconds_local(2, move || {
+            glib::timeout_add_seconds_local(1, move || {
+                app.tick();
+                glib::ControlFlow::Continue
+            });
+        }
+
+        // Safety-net full scan: catches tunnels started outside VpncBar and any
+        // pidfd watch we couldn't arm. Slow (10s) since pidfd handles prompt
+        // drop detection — this is just a backstop, not the primary mechanism.
+        {
+            let app = app.clone();
+            glib::timeout_add_seconds_local(10, move || {
                 app.refresh();
                 glib::ControlFlow::Continue
             });

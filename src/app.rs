@@ -6,9 +6,11 @@ use crate::backend;
 use crate::model::{load_profiles, Profile};
 use crate::notify::notify;
 use crate::tray::Tray;
-use crate::tunnel::connected_tunnels;
+use crate::tunnel::{connected_tunnels, uptime_secs};
+use gtk::glib;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::rc::Rc;
 
 /// Commands flowing from the tray (and later the GTK UI) into the controller.
@@ -35,6 +37,15 @@ struct State {
     profiles: Vec<Profile>,
     connected: HashMap<String, (u32, u64)>,
     last_connected: Option<HashSet<String>>, // None until first poll (no launch notification)
+    /// Per-tunnel process start time (seconds since boot), captured at each
+    /// `refresh()`. Lets `tick()` recompute the elapsed display locally every
+    /// second without re-scanning `/proc`.
+    start_secs: HashMap<String, f64>,
+    /// Live `pidfd` watches keyed by tunnel pid. Holding the `OwnedFd` keeps the
+    /// fd alive for its glib source; dropping it (in `reconcile_watches`) closes
+    /// it. The glib source is one-shot (returns `Break` on exit), so a dead
+    /// watch's source is already gone by the time we drop its fd.
+    watches: HashMap<u32, OwnedFd>,
     /// True once the no-tray fallback (window + notification) has fired, so we
     /// don't pop it repeatedly while a host stays absent. Re-armed on `TrayRestored`.
     tray_fallback_shown: bool,
@@ -67,6 +78,8 @@ impl App {
                 profiles: load_profiles(),
                 connected: HashMap::new(),
                 last_connected: None,
+                start_secs: HashMap::new(),
+                watches: HashMap::new(),
                 tray_fallback_shown: false,
             }),
             tray,
@@ -84,13 +97,22 @@ impl App {
         self.tx.clone()
     }
 
-    /// Re-read profiles + live tunnels, push to the tray, fire connect/disconnect
-    /// notifications on change, and ask the UI to redraw.
+    /// Heavy path: scan `/proc` for live tunnels, fire connect/disconnect
+    /// notifications on change, cache start times, (re)arm `pidfd` drop-watches,
+    /// push the tray snapshot, and ask the UI to redraw. Runs at startup, after
+    /// connect/disconnect, on a `pidfd` exit, and on a slow safety-net timer —
+    /// NOT every second (that's `tick()`, which does no scan).
     pub fn refresh(&self) {
         let profiles = load_profiles();
         let connected = connected_tunnels(&profiles);
         let names: Vec<String> = profiles.iter().map(|p| p.name.clone()).collect();
         let now: HashSet<String> = connected.keys().cloned().collect();
+
+        // Cache each tunnel's start instant (seconds since boot) so `tick()` can
+        // recompute elapsed locally: start = current uptime − measured elapsed.
+        let uptime = uptime_secs();
+        let start_secs: HashMap<String, f64> =
+            connected.iter().map(|(n, (_, e))| (n.clone(), uptime - *e as f64)).collect();
 
         // Notify per profile on change (manual connects + unexpected drops).
         {
@@ -116,8 +138,12 @@ impl App {
             }
             st.profiles = profiles;
             st.connected = connected.clone();
+            st.start_secs = start_secs;
             st.last_connected = Some(now);
         }
+
+        // (Re)arm a pidfd exit-watch per live tunnel; drop watches for gone pids.
+        self.reconcile_watches(&connected);
 
         // Push a fresh snapshot to the tray (skipped if the tray never started).
         if let Some(tray) = &self.tray {
@@ -129,6 +155,58 @@ impl App {
 
         if let Some(cb) = &self.hooks.borrow().on_refresh {
             cb();
+        }
+    }
+
+    /// Cheap per-second display update: recompute each live tunnel's elapsed
+    /// time locally from its cached start (one tiny `/proc/uptime` read, no
+    /// process scan) and push the snapshot to the tray. The window ticks its own
+    /// labels separately, so we don't fire the `on_refresh` UI rebuild here.
+    pub fn tick(&self) {
+        let snapshot = {
+            let mut st = self.state.borrow_mut();
+            if st.connected.is_empty() {
+                return; // nothing live → no I/O, no push
+            }
+            let uptime = uptime_secs();
+            let starts = st.start_secs.clone();
+            for (name, entry) in st.connected.iter_mut() {
+                if let Some(start) = starts.get(name) {
+                    entry.1 = (uptime - start).max(0.0) as u64;
+                }
+            }
+            st.connected.clone()
+        };
+        if let Some(tray) = &self.tray {
+            tray.update(move |t: &mut Tray| t.connected = snapshot.clone());
+        }
+    }
+
+    /// Open a one-shot `pidfd` glib watch for each newly-live tunnel and close
+    /// watches whose pid is gone. When a watched process exits, glib wakes the
+    /// closure, which enqueues `Cmd::Refresh` (→ `refresh()` notices the drop,
+    /// notifies, and reconciles). Must run on the glib main thread.
+    fn reconcile_watches(&self, connected: &HashMap<String, (u32, u64)>) {
+        let current: HashSet<u32> = connected.values().map(|(pid, _)| *pid).collect();
+        let mut st = self.state.borrow_mut();
+        // Drop fds for pids no longer live. Normal case: the process exited, so
+        // its one-shot source already removed itself (Break) — closing the fd is
+        // clean. Rare case (a live process that stopped matching a profile, e.g.
+        // after a rename): a stale source may remain on the closed fd, but it can
+        // only fire a spurious Cmd::Refresh, which re-scans truth — self-correcting.
+        st.watches.retain(|pid, _| current.contains(pid));
+        for &pid in &current {
+            if st.watches.contains_key(&pid) {
+                continue;
+            }
+            if let Some(fd) = crate::pidfd::open(pid) {
+                let tx = self.tx.clone();
+                glib::unix_fd_add_local(fd.as_raw_fd(), glib::IOCondition::IN, move |_, _| {
+                    let _ = tx.send_blocking(Cmd::Refresh);
+                    glib::ControlFlow::Break // one-shot: process is gone
+                });
+                st.watches.insert(pid, fd);
+            }
         }
     }
 

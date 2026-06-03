@@ -1642,6 +1642,7 @@ dependencies = [
  "env_logger",
  "gtk4",
  "ksni",
+ "libc",
  "log",
  "notify-rust",
  "serde",
