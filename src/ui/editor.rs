@@ -22,7 +22,7 @@ thread_local! {
     /// One editor window per profile (keyed by uuid; new profiles share the
     /// "__new__" slot), so re-opening an editor just brings it forward instead
     /// of spawning a duplicate. Mirrors the macOS per-uuid editor registry.
-    static OPEN_EDITORS: RefCell<std::collections::HashMap<String, gtk::Window>> =
+    static OPEN_EDITORS: RefCell<std::collections::HashMap<String, Rc<Editor>>> =
         RefCell::new(std::collections::HashMap::new());
 }
 
@@ -34,13 +34,13 @@ pub fn open_editor(app: &Rc<App>, parent: &gtk::Window, profile: Option<Profile>
         .and_then(|p| p.uuid.clone())
         .unwrap_or_else(|| "__new__".to_string());
 
-    if let Some(win) = OPEN_EDITORS.with(|m| m.borrow().get(&key).cloned()) {
-        win.present();
+    if let Some(ed) = OPEN_EDITORS.with(|m| m.borrow().get(&key).cloned()) {
+        ed.window.present();
         return;
     }
 
     let ed = Editor::new(app, parent, profile);
-    OPEN_EDITORS.with(|m| m.borrow_mut().insert(key.clone(), ed.window.clone()));
+    OPEN_EDITORS.with(|m| m.borrow_mut().insert(key.clone(), ed.clone()));
     // Drop the registry entry when the window closes so it can be reopened.
     ed.window.connect_close_request(move |_| {
         OPEN_EDITORS.with(|m| {
@@ -49,6 +49,18 @@ pub fn open_editor(app: &Rc<App>, parent: &gtk::Window, profile: Option<Profile>
         glib::Propagation::Proceed
     });
     ed.present();
+}
+
+/// Push the live connection state into every open editor (Connect/Disconnect
+/// button). Called from the controller's refresh — i.e. exactly when the state
+/// changes (connect/disconnect commands, a pidfd drop, the safety-net scan) —
+/// instead of each editor polling for it.
+pub fn refresh_open_editors() {
+    OPEN_EDITORS.with(|m| {
+        for ed in m.borrow().values() {
+            ed.refresh_connect_button();
+        }
+    });
 }
 
 /// Holds every input widget so Save can read them back.
@@ -619,8 +631,9 @@ impl Editor {
 
     fn update_info_debug(&self) {
         let p = self.profile.borrow().clone();
-        // Info: live tunnel state (only meaningful when connected).
-        let connected = p.uuid.is_some() && is_connected(&p);
+        // Live state from the controller's cached map (kept fresh by pidfd
+        // watches + the safety-net scan) — no per-second /proc walk here.
+        let connected = p.uuid.is_some() && self.app.connected().contains_key(&p.name);
 
         // Resolve any in-flight Connecting…/Disconnecting… transition: keep it
         // until the real state reaches the target or the 20s deadline lapses.
@@ -788,8 +801,11 @@ impl Editor {
 
     fn refresh_connect_button(&self) {
         let p = self.profile.borrow();
-        // Only meaningful once saved (has a uuid / persisted name).
-        let connected = p.uuid.is_some() && is_connected(&p);
+        // Only meaningful once saved (has a uuid / persisted name). Not polled:
+        // runs at editor open, after save/toggle, and via refresh_open_editors()
+        // whenever the controller detects a state change. Reads the controller's
+        // cached map — no /proc scan.
+        let connected = p.uuid.is_some() && self.app.connected().contains_key(&p.name);
         self.connect_btn.set_label(if connected { "Disconnect" } else { "Connect" });
         self.connect_btn.set_sensitive(p.uuid.is_some() || !self.fields.name.text().is_empty());
     }

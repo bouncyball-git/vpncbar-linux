@@ -28,7 +28,12 @@ pub fn install_hooks(app: &Rc<App>, application: &gtk::Application) {
         open_window: Some(Box::new(move || w_open.present())),
         about: Some(Box::new(move || about::show(&w_about.gtk_window(), &app_about))),
         request_otp: Some(Box::new(move |p| otp::prompt(&w_otp.gtk_window(), p))),
-        on_refresh: Some(Box::new(move || w_refresh.refresh())),
+        // State changed (connect/disconnect/drop): redraw the window AND push
+        // the new state into any open editors (Connect/Disconnect button).
+        on_refresh: Some(Box::new(move || {
+            w_refresh.refresh();
+            editor::refresh_open_editors();
+        })),
     });
 
     // Debug aid for development screenshots: VPNCBAR_AUTOEDIT=new|<profile name>.
