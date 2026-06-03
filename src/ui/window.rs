@@ -1,6 +1,7 @@
 //! The main "VpncBar" window: the rich profile list that replaces the macOS
 //! menu rows. Each row shows a ✓ when connected and a live, per-second elapsed
-//! timer; activating a row toggles its tunnel; per-row buttons edit/remove it.
+//! timer. The rows are non-interactive (no hover); per-row buttons connect/
+//! disconnect (lightning), edit, and remove the profile.
 
 use crate::app::{App, Cmd};
 use crate::model::{remove_profile, Profile};
@@ -180,7 +181,7 @@ impl MainWindow {
     fn build_row(&self, p: &Profile, live: Option<(u32, u64)>, now: Instant) -> gtk::ListBoxRow {
         let inner = &self.0;
         let row = gtk::ListBoxRow::new();
-        row.set_activatable(true);
+        row.set_activatable(false); // no row hover; actions live on the buttons
 
         let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         hbox.set_margin_top(6);
@@ -228,24 +229,38 @@ impl MainWindow {
         }
         hbox.append(&elapsed);
 
-        // Edit + remove buttons.
+        // Action buttons: connect/disconnect (lightning), edit, remove. Flat so
+        // they stay quiet until hovered; the row itself is non-activatable, so
+        // only these buttons highlight on hover (not the whole row).
+        let connected = live.is_some();
+
+        let connect = gtk::Button::new();
+        connect.set_has_frame(false);
+        connect.set_tooltip_text(Some(if connected { "Disconnect" } else { "Connect" }));
+        // Self-rendered bolt in a light (near-white) fill so it stands out on the
+        // dark list. Slashed bolt = connected → click disconnects.
+        let bolt = gtk::Image::new();
+        if let Some(tex) = crate::tray_icon::bolt_texture(20, (0.95, 0.95, 0.95), connected) {
+            bolt.set_paintable(Some(&tex));
+        }
+        connect.set_child(Some(&bolt));
+
         let edit = gtk::Button::from_icon_name("document-edit-symbolic");
         edit.set_has_frame(false);
         edit.set_tooltip_text(Some("Edit"));
         let del = gtk::Button::from_icon_name("user-trash-symbolic");
         del.set_has_frame(false);
         del.set_tooltip_text(Some("Remove"));
+        hbox.append(&connect);
         hbox.append(&edit);
         hbox.append(&del);
 
         row.set_child(Some(&hbox));
 
-        // Row activation toggles the tunnel (left-click, like the macOS row).
-        let connected = live.is_some();
         {
             let app = inner.app.clone();
             let name = p.name.clone();
-            row.connect_activate(move |_| {
+            connect.connect_clicked(move |_| {
                 let cmd = if connected {
                     Cmd::Disconnect(name.clone())
                 } else {

@@ -10,10 +10,13 @@
 //! recoloured by the panel). Set `VPNCBAR_TRAY_FG=dark` for a dark glyph on a
 //! light panel.
 
-use gtk::cairo::{Context, FillRule, Format, ImageSurface};
+use gtk::cairo::{Context, FillRule, Format, ImageSurface, LineCap, Operator};
 use gtk::prelude::Cast;
 
 const LOCK_SVG: &str = include_str!("../packaging/lock.svg");
+
+/// Lightning-bolt outline (single fill path) for the VPN Manager connect button.
+const BOLT_PATH: &str = "M13 2 L3 14 L12 14 L11 22 L21 10 L12 10 Z";
 
 /// Sizes we render so the host can pick the best fit for its panel / scale.
 /// Includes high-res entries so a HiDPI/scaled panel downscales a crisp source
@@ -40,6 +43,73 @@ pub fn padlock_set(connected: bool) -> Vec<ksni::Icon> {
 /// window icon) so it shows even when running uninstalled. Drawn in `fg`.
 pub fn closed_lock_texture(size: i32, fg: (f64, f64, f64)) -> Option<gtk::gdk::Texture> {
     let mut surface = render(LOCK_SVG, fg, size)?;
+    let stride = surface.stride();
+    let data = surface.data().ok()?;
+    let bytes = gtk::glib::Bytes::from(&data[..]);
+    Some(
+        gtk::gdk::MemoryTexture::new(
+            size,
+            size,
+            gtk::gdk::MemoryFormat::B8g8r8a8Premultiplied,
+            &bytes,
+            stride as usize,
+        )
+        .upcast(),
+    )
+}
+
+/// A lightning-bolt texture for the VPN Manager connect button, drawn in `fg`.
+/// `slash` adds a diagonal "disabled" stroke (top-left → bottom-right) with a
+/// transparent keyline cut through the bolt so it reads as crossed-out — the
+/// connected state, where the button disconnects. Self-rendered (like the tray
+/// glyph) so it needs no installed theme icon and works uninstalled.
+pub fn bolt_texture(size: i32, fg: (f64, f64, f64), slash: bool) -> Option<gtk::gdk::Texture> {
+    let toks = tokenize(BOLT_PATH);
+    let mut surface = ImageSurface::create(Format::ARgb32, size, size).ok()?;
+    {
+        let cr = Context::new(&surface).ok()?;
+        cr.set_antialias(gtk::cairo::Antialias::Best);
+        cr.set_fill_rule(FillRule::EvenOdd);
+
+        // Fit the bolt into the icon (with margin so the slash can extend past it).
+        run_path(&cr, &toks);
+        let (x1, y1, x2, y2) = cr.fill_extents().unwrap_or((0.0, 0.0, 1.0, 1.0));
+        cr.new_path();
+        let (bw, bh) = (x2 - x1, y2 - y1);
+        if bw > 0.0 && bh > 0.0 {
+            let margin = size as f64 * 0.06;
+            let avail = size as f64 - 2.0 * margin;
+            let scale = (avail / bw).min(avail / bh);
+            let tx = margin + (avail - bw * scale) / 2.0 - x1 * scale;
+            let ty = margin + (avail - bh * scale) / 2.0 - y1 * scale;
+            cr.translate(tx, ty);
+            cr.scale(scale, scale);
+            cr.set_source_rgba(fg.0, fg.1, fg.2, 1.0);
+            run_path(&cr, &toks);
+            let _ = cr.fill();
+            cr.identity_matrix(); // back to device coords for the slash
+        }
+
+        if slash {
+            let m = size as f64;
+            cr.set_line_cap(LineCap::Round);
+            // Clear a thin keyline first so the slash reads as separate from the
+            // bolt without erasing it.
+            cr.set_operator(Operator::Clear);
+            cr.set_line_width(m * 0.14);
+            cr.move_to(m * 0.12, m * 0.12);
+            cr.line_to(m * 0.88, m * 0.88);
+            let _ = cr.stroke();
+            // The visible diagonal slash (thin).
+            cr.set_operator(Operator::Over);
+            cr.set_source_rgba(fg.0, fg.1, fg.2, 1.0);
+            cr.set_line_width(m * 0.07);
+            cr.move_to(m * 0.12, m * 0.12);
+            cr.line_to(m * 0.88, m * 0.88);
+            let _ = cr.stroke();
+        }
+    }
+    surface.flush();
     let stride = surface.stride();
     let data = surface.data().ok()?;
     let bytes = gtk::glib::Bytes::from(&data[..]);
