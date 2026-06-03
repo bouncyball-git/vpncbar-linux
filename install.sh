@@ -1,8 +1,16 @@
 #!/bin/sh
-# Build and install VpncBar (Linux). Run as your normal user; it sudo's only the
-# privileged steps. Idempotent — safe to re-run to upgrade.
+# Install VpncBar (Linux). Usage: ./install.sh [release|debug]   (default: release)
+# Build first with ./build.sh [release|debug]. Run as your normal user; it
+# sudo's only the privileged steps. Idempotent — safe to re-run to upgrade.
 set -e
 cd "$(dirname "$0")"
+
+PROFILE="${1:-release}"
+case "$PROFILE" in
+    release | debug) ;;
+    *) echo "usage: $0 [release|debug]" >&2; exit 1 ;;
+esac
+BINARY="target/$PROFILE/vpncbar"
 
 PREFIX=/usr
 BIN="$PREFIX/bin/vpncbar"
@@ -20,7 +28,6 @@ missing=
 command -v vpnc >/dev/null 2>&1        || missing="$missing vpnc"
 command -v secret-tool >/dev/null 2>&1 || missing="$missing libsecret(secret-tool)"
 command -v pkexec >/dev/null 2>&1      || missing="$missing polkit(pkexec)"
-pkg-config --exists gtk4 2>/dev/null   || missing="$missing gtk4"
 if [ -n "$missing" ]; then
     echo "   ! Missing:$missing"
     echo "     On Arch/Manjaro:  sudo pacman -S --needed vpnc openconnect libsecret polkit gtk4"
@@ -29,11 +36,13 @@ fi
 command -v openconnect >/dev/null 2>&1 || \
     echo "   (note) openconnect not found — vpnc profiles work; install it for AnyConnect."
 
-echo "==> Building release binary"
-cargo build --release
+if [ ! -x "$BINARY" ]; then
+    echo "   ! No $BINARY — run ./build.sh $PROFILE first."
+    exit 1
+fi
 
-echo "==> Installing (sudo)"
-sudo install -Dm755 target/release/vpncbar       "$BIN"
+echo "==> Installing $PROFILE binary (sudo)"
+sudo install -Dm755 "$BINARY"                    "$BIN"
 sudo install -Dm755 packaging/vpncbar-script     "$LIBDIR/vpncbar-script"
 sudo install -Dm755 packaging/vpncbar-disconnect "$LIBDIR/vpncbar-disconnect"
 sudo install -Dm644 packaging/10-vpncbar.rules   "$POLKIT"
