@@ -8,7 +8,7 @@
 
 use crate::app::Cmd;
 use crate::tunnel::format_elapsed;
-use ksni::menu::{MenuItem, StandardItem};
+use ksni::menu::{CheckmarkItem, MenuItem, StandardItem};
 use std::collections::HashMap;
 
 pub struct Tray {
@@ -104,25 +104,23 @@ impl ksni::Tray for Tray {
                 .into(),
             );
         } else {
-            // The host renders the popup (we only supply plain-text labels over
-            // DBusMenu) in a proportional font with no column/tab support, so the
-            // elapsed time CANNOT be right-justified: space-padding doesn't equal
-            // equal pixel widths, and a '\t' is shown as plain space on Plasma.
-            // So we don't fake a column — the time goes in parentheses after the
-            // name. MIN_WIDTH is a trailing-pad width floor that keeps the menu
-            // from collapsing narrow (invisible; some hosts may trim it).
-            const MIN_WIDTH: usize = 18;
+            // Use CheckmarkItem so the HOST draws the connected tick in its own
+            // gutter column (left of the label). That keeps every VPN name
+            // vertically aligned — checked or not — and aligned with the other
+            // menu entries, which a text "✓ " prefix can't do (it's part of the
+            // label, and the glyph isn't the same width as the spaces we'd pad
+            // unchecked rows with). The label carries only the name + elapsed.
             for name in &self.profiles {
                 let live = self.connected.get(name).copied();
-                let body = match live {
-                    Some((_, secs)) => format!("✓ {name} ({})", format_elapsed(secs)),
-                    None => format!("  {name}"),
+                let label = match live {
+                    Some((_, secs)) => format!("{name} ({})", format_elapsed(secs)),
+                    None => name.clone(),
                 };
-                let label = format!("{body:<w$}", w = MIN_WIDTH);
                 let n = name.clone();
                 items.push(
-                    StandardItem {
+                    CheckmarkItem {
                         label,
+                        checked: live.is_some(),
                         activate: Box::new(move |t: &mut Self| {
                             let connected = t.connected.contains_key(&n);
                             let cmd = if connected {

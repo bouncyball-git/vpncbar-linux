@@ -11,22 +11,28 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 pub fn prompt(parent: &gtk::Window, p: &Profile) -> Option<String> {
+    let title = format!("Enter 2FA code for {}", p.name);
     let win = gtk::Window::builder()
-        .title(format!("One-time code for “{}”", p.name))
+        .title(&title)
         .transient_for(parent)
         .modal(true)
         .resizable(false)
         .build();
+
+    // Show the title in full — never ellipsize. The window's default title label
+    // ellipsizes when the header is narrow; a custom HeaderBar with a plain Label
+    // (ellipsize off) instead forces the window to grow to the title's width.
+    let header = gtk::HeaderBar::new();
+    let title_lbl = gtk::Label::new(Some(&title));
+    title_lbl.set_ellipsize(gtk::pango::EllipsizeMode::None);
+    header.set_title_widget(Some(&title_lbl));
+    win.set_titlebar(Some(&header));
 
     let vb = gtk::Box::new(gtk::Orientation::Vertical, 10);
     vb.set_margin_top(14);
     vb.set_margin_bottom(14);
     vb.set_margin_start(14);
     vb.set_margin_end(14);
-
-    let info = gtk::Label::new(Some("Enter the current 2FA code (e.g. from your authenticator)."));
-    info.set_wrap(true);
-    vb.append(&info);
 
     let entry = gtk::Entry::builder().activates_default(true).build();
     entry.set_input_purpose(gtk::InputPurpose::Digits);
