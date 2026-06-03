@@ -154,6 +154,50 @@ impl IdDropDown {
     fn new(items: &[(&str, &str)], active: Option<&str>) -> Self {
         let labels: Vec<&str> = items.iter().map(|(_, l)| *l).collect();
         let dd = gtk::DropDown::from_strings(&labels);
+
+        // Plain-label factory for both the button and the popup rows: the
+        // default one puts a checkmark on the selected row, which widens the
+        // popup past the button. Without it the two render the same width.
+        let factory = gtk::SignalListItemFactory::new();
+        factory.connect_setup(|_, obj| {
+            if let Some(item) = obj.downcast_ref::<gtk::ListItem>() {
+                let label = gtk::Label::new(None);
+                label.set_xalign(0.0);
+                item.set_child(Some(&label));
+            }
+        });
+        factory.connect_bind(|_, obj| {
+            if let Some(item) = obj.downcast_ref::<gtk::ListItem>() {
+                if let (Some(label), Some(s)) = (
+                    item.child().and_downcast::<gtk::Label>(),
+                    item.item().and_downcast::<gtk::StringObject>(),
+                ) {
+                    label.set_text(&s.string());
+                }
+            }
+        });
+        dd.set_factory(Some(&factory));
+
+        // Size the closed button to the WIDEST item: DropDown only sizes it to
+        // the selected one, so it came up narrower than its popup (and jumped on
+        // selection change). Measured once on first map (when the theme CSS is
+        // applied): chrome = natural − selected-label width, then request
+        // widest-label + chrome.
+        {
+            let labels: Vec<String> = labels.iter().map(|s| s.to_string()).collect();
+            let done = std::cell::Cell::new(false);
+            dd.connect_map(move |dd| {
+                if done.replace(true) {
+                    return;
+                }
+                let (_, nat, _, _) = dd.measure(gtk::Orientation::Horizontal, -1);
+                let text_w = |s: &str| dd.create_pango_layout(Some(s)).pixel_size().0;
+                let sel_w = labels.get(dd.selected() as usize).map(|s| text_w(s)).unwrap_or(0);
+                let max_w = labels.iter().map(|s| text_w(s)).max().unwrap_or(sel_w);
+                dd.set_size_request(nat - sel_w + max_w, -1);
+            });
+        }
+
         let ids = Rc::new(items.iter().map(|(id, _)| id.to_string()).collect::<Vec<_>>());
         let me = IdDropDown { dd, ids };
         me.set_active_id(active);
@@ -251,6 +295,7 @@ impl Editor {
         // Type selector (locked once a profile exists).
         let type_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         type_bar.set_margin_top(10);
+        type_bar.set_margin_bottom(10); // breathing room before the notebook tabs
         type_bar.set_margin_start(12);
         type_bar.set_margin_end(12);
         let type_label = gtk::Label::new(Some("Type:"));
