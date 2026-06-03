@@ -14,7 +14,7 @@ use crate::secrets;
 use crate::tunnel::is_connected;
 use gtk::glib;
 use gtk::prelude::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 thread_local! {
@@ -108,6 +108,17 @@ struct Editor {
     /// mirroring the macOS editor so the status doesn't flicker through the
     /// stale state. Cleared once the real state reaches the target or times out.
     transition: RefCell<Option<(bool, std::time::Instant)>>,
+    /// True while a vpnc journal fetch is in flight, so the 1s Debug refresh
+    /// doesn't pile up `journalctl` calls. `Rc<Cell>` so the async result handler
+    /// can clear it without borrowing the whole editor.
+    journal_busy: Rc<Cell<bool>>,
+    /// "Clear log" cutoff (unix seconds) for vpnc: the journal can't be
+    /// truncated, so clearing means showing only lines newer than this.
+    clear_cutoff: Cell<Option<u64>>,
+    /// Last live vpnc pid, kept across the drop so the first refresh after a
+    /// disconnect can run one final journal sync (capturing the teardown lines)
+    /// before the tunnel's journal scope is forgotten.
+    last_vpnc_pid: Cell<Option<u32>>,
 }
 
 fn entry(text: Option<&str>, placeholder: &str) -> gtk::Entry {
@@ -153,6 +164,15 @@ fn add_row(grid: &gtk::Grid, row: i32, label: &str, w: &impl IsA<gtk::Widget>) {
     l.add_css_class("dim-label");
     grid.attach(&l, 0, row, 1, 1);
     grid.attach(w, 1, row, 1, 1);
+}
+
+/// Replace a TextView's contents only if they changed (avoids resetting the
+/// scroll/cursor every refresh).
+fn set_view_text(view: &gtk::TextView, text: &str) {
+    let buf = view.buffer();
+    if buf.text(&buf.start_iter(), &buf.end_iter(), false) != text {
+        buf.set_text(text);
+    }
 }
 
 fn form_grid() -> gtk::Grid {
@@ -292,6 +312,10 @@ impl Editor {
                 l.set_xalign(0.0);
                 l.set_yalign(0.0);
                 l.set_selectable(true);
+                // Don't take keyboard focus: a selectable label auto-selects ALL
+                // its text on focus-in, which painted the whole Info block blue
+                // when the tab opened. Mouse drag-selection still works for copy.
+                l.set_can_focus(false);
                 l.set_wrap(true);
                 l
             },
@@ -346,6 +370,9 @@ impl Editor {
             connect_btn: connect_btn.clone(),
             groups: RefCell::new(std::collections::HashMap::new()),
             transition: RefCell::new(None),
+            journal_busy: Rc::new(Cell::new(false)),
+            clear_cutoff: Cell::new(None),
+            last_vpnc_pid: Cell::new(None),
         });
 
         // Rebuild pages when the type changes (new profiles only).
@@ -568,24 +595,106 @@ impl Editor {
         }
         self.fields.info_label.set_text(&s);
 
-        // Debug: tail of the per-session log.
-        let log = std::fs::read_to_string(crate::model::log_file(&p)).unwrap_or_default();
-        let buf = self.fields.debug_view.buffer();
-        if buf.text(&buf.start_iter(), &buf.end_iter(), false) != log {
-            buf.set_text(&log);
+        // Debug tab. openconnect keeps writing its session to the per-profile log
+        // file (inherited stdout/stderr), so we tail that. vpnc abandons those fds
+        // on daemonising and logs to syslog instead, so its file is always empty —
+        // we pull its lines from the journal, scoped to the live tunnel's PID.
+        let view = &self.fields.debug_view;
+        if p.is_openconnect() {
+            let log = std::fs::read_to_string(crate::model::log_file(&p)).unwrap_or_default();
+            set_view_text(view, &log);
+        } else if let Some((pid, _)) = live {
+            self.last_vpnc_pid.set(Some(pid));
+            self.sync_vpnc_log(&p, pid);
+        } else if let Some(pid) = self.last_vpnc_pid.take() {
+            // First refresh after a drop: one final sync with the last known pid
+            // so the teardown lines land in the persisted file. (If a fetch is
+            // mid-flight, put the pid back and retry next tick.)
+            if self.journal_busy.get() {
+                self.last_vpnc_pid.set(Some(pid));
+            } else {
+                self.sync_vpnc_log(&p, pid);
+            }
+        } else {
+            // Disconnected: keep showing the last session's persisted log until
+            // the next connection truncates the boot log and rebuilds it.
+            let log = std::fs::read_to_string(crate::model::log_file(&p)).unwrap_or_default();
+            if log.trim().is_empty() {
+                set_view_text(view, "No session log yet — connect to capture one.");
+            } else {
+                set_view_text(view, &log);
+            }
         }
+    }
+
+    /// Busy-guarded async rebuild of the vpnc session log (boot + journal):
+    /// persists it to `log_file` (for "Reveal log") and refreshes the Debug
+    /// view. Runs while connected, plus once more right after a drop.
+    fn sync_vpnc_log(&self, p: &Profile, pid: u32) {
+        if self.journal_busy.get() {
+            return;
+        }
+        self.journal_busy.set(true);
+        let prof = p.clone();
+        let logpath = crate::model::log_file(p);
+        let since = self.clear_cutoff.get();
+        let (tx, rx) = async_channel::bounded::<Result<String, ()>>(1);
+        std::thread::spawn(move || {
+            let r = crate::backend::vpnc::session_log(&prof, pid, since);
+            if let Ok(text) = &r {
+                let _ = std::fs::write(&logpath, text); // persist for the file-based tools
+            }
+            let _ = tx.send_blocking(r);
+        });
+        let view = self.fields.debug_view.clone();
+        let busy = self.journal_busy.clone();
+        glib::spawn_future_local(async move {
+            let res = rx.recv().await;
+            busy.set(false);
+            let text = match res {
+                Ok(Ok(t)) if !t.trim().is_empty() => t,
+                Ok(Ok(_)) => "No vpnc output yet. At Debug 1 vpnc only logs steady-state \
+                              packets; raise Debug to 2 or 3 in Options for the handshake."
+                    .to_string(),
+                _ => "Can't read the system journal — your user needs to be in the \
+                      'systemd-journal' (or 'wheel') group.\n\
+                      View manually with:  journalctl -t vpnc"
+                    .to_string(),
+            };
+            set_view_text(&view, &text);
+        });
     }
 
     fn clear_log(&self) {
         let p = self.profile.borrow().clone();
         let _ = std::fs::write(crate::model::log_file(&p), b"");
+        if !p.is_openconnect() {
+            // vpnc: the runtime lines live in the system journal, which we can't
+            // truncate — record a cutoff so only newer lines show from here on,
+            // and drop the connect-phase capture too.
+            let _ = std::fs::write(crate::model::boot_log_file(&p), b"");
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            self.clear_cutoff.set(Some(now));
+        }
         self.update_info_debug();
     }
 
     fn reveal_log(&self) {
         let p = self.profile.borrow().clone();
-        let dir = crate::model::run_dir();
-        let _ = dir; // ensure path computed
+        // vpnc's session log is rebuilt (boot + journal); refresh it before
+        // opening (synchronous here — it's a one-off click).
+        if !p.is_openconnect() {
+            if let Some((pid, _)) = self.app.connected().get(&p.name).copied() {
+                if let Ok(text) =
+                    crate::backend::vpnc::session_log(&p, pid, self.clear_cutoff.get())
+                {
+                    let _ = std::fs::write(crate::model::log_file(&p), &text);
+                }
+            }
+        }
         let _ = crate::sys::run("/usr/bin/xdg-open", &[&crate::model::log_file(&p).to_string_lossy()], None);
     }
 

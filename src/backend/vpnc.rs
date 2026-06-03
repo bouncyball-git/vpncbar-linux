@@ -6,7 +6,7 @@
 //! write it to the per-profile log for the Debug tab.
 
 use super::{script_invocation, ActionResult};
-use crate::model::{ne, pid_file, log_file, split_domain_user, Profile};
+use crate::model::{boot_log_file, ne, pid_file, split_domain_user, Profile};
 use crate::privilege::{self, was_dismissed};
 use crate::secrets;
 use crate::sys::{resolve_gateway_ip, VPNC};
@@ -95,17 +95,18 @@ pub fn connect(p: &Profile) -> ActionResult {
         Err(e) => return e,
     };
 
-    let log = log_file(p);
+    let log = boot_log_file(p);
     let pid = pid_file(p);
     let pid_s = pid.to_string_lossy();
     // vpnc reads its config from stdin ("-"), detaches after the tunnel is up,
     // and writes its pid to --pid-file. We escalate the whole thing via pkexec.
     // Stock vpnc has no --log-file (that was a vendored patch) and reopens its
     // std fds to /dev/null when it daemonises, so redirecting stdout/stderr to
-    // the per-profile log captures the full connection phase (handshake +
-    // errors) for the Debug tab — the most a non-patched vpnc can give us.
-    // (openconnect, which keeps stderr under --background, logs its whole
-    // session this way.)
+    // the BOOT log captures the full connection phase (handshake + debug +
+    // errors) — frozen once it detaches. The runtime goes to syslog; the
+    // user-facing session log is rebuilt from both by `session_log`.
+    // (openconnect, which keeps stderr under --background, writes its whole
+    // session straight to the session log instead.)
     let r = privilege::run_root_to_file(
         VPNC,
         &["--non-inter", "--pid-file", &pid_s, "-"],
@@ -123,4 +124,42 @@ pub fn connect(p: &Profile) -> ActionResult {
     let detail = crate::sys::tail_chars(&r.out, 600);
     let detail = if detail.is_empty() { r.out.clone() } else { detail };
     ActionResult::Message(format!("vpnc failed (status {}):\n{detail}", r.status))
+}
+
+/// This tunnel's runtime lines from the journal (vpnc daemonises to syslog),
+/// scoped to the live PID so concurrent tunnels don't mix. `since` (unix
+/// seconds) filters to newer lines — that's how "Clear log" works, since the
+/// system journal itself can't be truncated. `Err(())` if journalctl failed
+/// (e.g. the user can't read the system journal).
+fn journal_log(pid: u32, since: Option<u64>) -> Result<String, ()> {
+    let pid_arg = format!("_PID={pid}");
+    let mut args = vec!["-t", "vpnc", &pid_arg, "-o", "cat", "--no-pager", "-n", "2000"];
+    let since_arg;
+    if let Some(s) = since {
+        since_arg = format!("--since=@{s}");
+        args.push(&since_arg);
+    }
+    let r = crate::sys::run("/usr/bin/journalctl", &args, None);
+    if r.ok() {
+        Ok(r.out)
+    } else {
+        Err(())
+    }
+}
+
+/// Rebuild the user-facing session text for a live vpnc tunnel: the connect-phase
+/// boot log (handshake/debug captured on stdout/stderr before vpnc detached)
+/// followed by the runtime lines vpnc sent to syslog. Callers persist this to
+/// `log_file(p)` so the Debug tab and "Reveal log" work off a real file, like
+/// openconnect's.
+pub fn session_log(p: &Profile, pid: u32, since: Option<u64>) -> Result<String, ()> {
+    let journal = journal_log(pid, since)?;
+    let boot = std::fs::read_to_string(boot_log_file(p)).unwrap_or_default();
+    let mut out = String::new();
+    if !boot.trim().is_empty() {
+        out.push_str(boot.trim_end());
+        out.push('\n');
+    }
+    out.push_str(&journal);
+    Ok(out)
 }

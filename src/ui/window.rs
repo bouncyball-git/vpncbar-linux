@@ -64,7 +64,6 @@ impl MainWindow {
         let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         spacer.set_hexpand(true);
         let disc_all = gtk::Button::with_label("Disconnect All");
-        disc_all.add_css_class("destructive-action");
         bar.append(&add);
         bar.append(&import);
         bar.append(&spacer);

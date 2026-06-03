@@ -161,8 +161,17 @@ pub fn pid_file(p: &Profile) -> PathBuf {
 }
 
 /// Per-profile session log: "<uuid>_<name>.log" (truncated per connect).
+/// openconnect writes it live; for vpnc it's rebuilt from the boot log + journal.
 pub fn log_file(p: &Profile) -> PathBuf {
     run_dir().join(format!("{}_{}.log", p.ident(), p.safe_name()))
+}
+
+/// vpnc's connect-phase capture: everything it printed to stdout/stderr before
+/// detaching (the handshake — and at Debug ≥1 the full negotiation/hex dumps).
+/// Frozen once the daemon backgrounds (it reopens its fds to /dev/null); the
+/// user-facing session log is rebuilt from this + the journal's runtime lines.
+pub fn boot_log_file(p: &Profile) -> PathBuf {
+    run_dir().join(format!("{}_{}.boot.log", p.ident(), p.safe_name()))
 }
 
 /// Per-tunnel runtime info written by the network script on connect.
