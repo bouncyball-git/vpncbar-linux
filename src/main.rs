@@ -61,8 +61,23 @@ fn run_gui() {
         };
         // ksni 0.3: spawn() runs the SNI service on its own thread and hands
         // back a Handle for `update`. (TrayMethods provides spawn().)
+        //
+        // assume_sni_available(true): a missing StatusNotifierWatcher (no tray
+        // host — e.g. stock GNOME without the AppIndicator extension) is treated
+        // as a soft error instead of failing spawn(). The service stays up and
+        // the icon attaches if a host appears later; meanwhile Tray::watcher_offline
+        // sends Cmd::TrayUnavailable so the controller opens a window fallback.
+        // spawn() can still fail on a genuine D-Bus failure (no session bus),
+        // which is rare; in that case we run window-only with no tray handle.
         use ksni::blocking::TrayMethods;
-        let handle = tray.spawn().expect("failed to start the system tray");
+        let handle = match tray.assume_sni_available(true).spawn() {
+            Ok(h) => Some(h),
+            Err(e) => {
+                log::error!("system tray could not start ({e}); running window-only");
+                let _ = tx.send_blocking(Cmd::TrayUnavailable);
+                None
+            }
+        };
 
         let app = App::new(handle, tx);
         ui::install_hooks(&app, application);

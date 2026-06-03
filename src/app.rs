@@ -21,6 +21,13 @@ pub enum Cmd {
     About,
     Refresh,
     Quit,
+    /// No StatusNotifierHost is available, so the tray icon can't be shown.
+    /// Sent from the ksni service thread (`Tray::watcher_offline`); the
+    /// controller falls back to opening the window so the app stays usable.
+    TrayUnavailable,
+    /// A StatusNotifierHost (re)appeared after a `TrayUnavailable`; arm the
+    /// fallback again so a later loss re-triggers it.
+    TrayRestored,
 }
 
 /// Main-thread-only mutable state (touched solely from the glib loop).
@@ -28,6 +35,9 @@ struct State {
     profiles: Vec<Profile>,
     connected: HashMap<String, (u32, u64)>,
     last_connected: Option<HashSet<String>>, // None until first poll (no launch notification)
+    /// True once the no-tray fallback (window + notification) has fired, so we
+    /// don't pop it repeatedly while a host stays absent. Re-armed on `TrayRestored`.
+    tray_fallback_shown: bool,
 }
 
 /// UI callbacks injected by `main` — no-ops until the GTK UI (milestone 3) sets them.
@@ -43,18 +53,21 @@ pub struct UiHooks {
 
 pub struct App {
     state: RefCell<State>,
-    tray: ksni::blocking::Handle<Tray>,
+    /// `None` when the SNI service couldn't start at all (e.g. no D-Bus); the
+    /// app then runs window-only and tray snapshot pushes are skipped.
+    tray: Option<ksni::blocking::Handle<Tray>>,
     tx: async_channel::Sender<Cmd>,
     hooks: RefCell<UiHooks>,
 }
 
 impl App {
-    pub fn new(tray: ksni::blocking::Handle<Tray>, tx: async_channel::Sender<Cmd>) -> Rc<Self> {
+    pub fn new(tray: Option<ksni::blocking::Handle<Tray>>, tx: async_channel::Sender<Cmd>) -> Rc<Self> {
         Rc::new(App {
             state: RefCell::new(State {
                 profiles: load_profiles(),
                 connected: HashMap::new(),
                 last_connected: None,
+                tray_fallback_shown: false,
             }),
             tray,
             tx,
@@ -106,11 +119,13 @@ impl App {
             st.last_connected = Some(now);
         }
 
-        // Push a fresh snapshot to the tray.
-        self.tray.update(move |t: &mut Tray| {
-            t.profiles = names.clone();
-            t.connected = connected.clone();
-        });
+        // Push a fresh snapshot to the tray (skipped if the tray never started).
+        if let Some(tray) = &self.tray {
+            tray.update(move |t: &mut Tray| {
+                t.profiles = names.clone();
+                t.connected = connected.clone();
+            });
+        }
 
         if let Some(cb) = &self.hooks.borrow().on_refresh {
             cb();
@@ -190,6 +205,31 @@ impl App {
                 }
             }
             Cmd::Refresh => self.refresh(),
+            Cmd::TrayUnavailable => {
+                // Fire once per offline episode: surface the window so the app is
+                // still operable without a tray icon, and tell the user why.
+                let already = {
+                    let mut st = self.state.borrow_mut();
+                    let was = st.tray_fallback_shown;
+                    st.tray_fallback_shown = true;
+                    was
+                };
+                if !already {
+                    if let Some(cb) = &self.hooks.borrow().open_window {
+                        cb();
+                    }
+                    notify(
+                        "VpncBar: no system tray",
+                        "No status-tray host was found, so the tray icon can't be shown. \
+                         The VpncBar window is open instead. On GNOME, enable the \
+                         AppIndicator/KStatusNotifierItem extension to get the tray icon.",
+                    );
+                }
+            }
+            Cmd::TrayRestored => {
+                // A host came back; re-arm so a future loss pops the fallback again.
+                self.state.borrow_mut().tray_fallback_shown = false;
+            }
             Cmd::Quit => {
                 self.disconnect_all_sync();
                 std::process::exit(0);

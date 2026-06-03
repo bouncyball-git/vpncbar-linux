@@ -69,6 +69,28 @@ impl ksni::Tray for Tray {
         Self::send(&self.tx, Cmd::OpenWindow);
     }
 
+    // Called on the ksni service thread when the StatusNotifierWatcher can't be
+    // reached. We return `true` to keep the service alive so the icon attaches
+    // automatically if a host appears later. `Error` means no SNI support at all
+    // (e.g. GNOME without the AppIndicator extension at launch) — fall back to a
+    // window. `No` is the transient case (e.g. a GNOME-on-Xorg shell restart),
+    // which usually recovers on its own, so we just log it to avoid window churn.
+    fn watcher_offline(&self, reason: ksni::OfflineReason) -> bool {
+        match reason {
+            ksni::OfflineReason::Error(e) => {
+                log::warn!("status-tray host unavailable ({e}); opening window fallback");
+                Self::send(&self.tx, Cmd::TrayUnavailable);
+            }
+            other => log::info!("status-tray watcher offline ({other:?}); awaiting recovery"),
+        }
+        true
+    }
+
+    fn watcher_online(&self) {
+        log::info!("status-tray watcher back online");
+        Self::send(&self.tx, Cmd::TrayRestored);
+    }
+
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let mut items: Vec<MenuItem<Self>> = Vec::new();
 
