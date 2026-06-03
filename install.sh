@@ -5,10 +5,28 @@
 set -e
 cd "$(dirname "$0")"
 
+usage() {
+    cat <<EOF
+Usage: $0 [release|debug|usage]
+
+  release   install target/release/vpncbar (default)
+  debug     install target/debug/vpncbar
+  usage     this help (also: -h, --help, help)
+
+Build first with ./build.sh [release|debug]. Also installs the helper script,
+disconnect helper, polkit rule, .desktop entry + icon, and sets up the
+passwordless 'vpncbar' group. Uninstall with ./uninstall.sh.
+EOF
+}
+
 PROFILE="${1:-release}"
 case "$PROFILE" in
     release | debug) ;;
-    *) echo "usage: $0 [release|debug]" >&2; exit 1 ;;
+    usage | help | -h | --help)
+        usage
+        exit 0
+        ;;
+    *) usage >&2; exit 1 ;;
 esac
 BINARY="target/$PROFILE/vpncbar"
 
