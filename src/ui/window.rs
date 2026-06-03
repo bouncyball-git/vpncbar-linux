@@ -238,10 +238,26 @@ impl MainWindow {
         connect.set_tooltip_text(Some(if connected { "Disconnect" } else { "Connect" }));
         // Self-rendered bolt in a light (near-white) fill so it stands out on the
         // dark list. Slashed bolt = connected → click disconnects.
-        let bolt = gtk::Image::new();
-        if let Some(tex) = crate::tray_icon::bolt_texture(20, (0.95, 0.95, 0.95), connected) {
-            bolt.set_paintable(Some(&tex));
+        //
+        // Theme symbolic icons (edit/trash) auto-dim when the window is unfocused
+        // (the BACKDROP widget state); GTK can't recolour our fixed-colour
+        // texture, so mirror that by re-rendering dimmer when BACKDROP flips.
+        fn render_bolt(w: &gtk::Image, connected: bool) {
+            let dim = w.state_flags().contains(gtk::StateFlags::BACKDROP);
+            let c = if dim { 0.55 } else { 0.95 };
+            if let Some(tex) = crate::tray_icon::bolt_texture(22, (c, c, c), connected) {
+                w.set_paintable(Some(&tex));
+            }
         }
+        let bolt = gtk::Image::new();
+        render_bolt(&bolt, connected);
+        bolt.connect_state_flags_changed(move |w, old| {
+            let was_backdrop = old.contains(gtk::StateFlags::BACKDROP);
+            let is_backdrop = w.state_flags().contains(gtk::StateFlags::BACKDROP);
+            if was_backdrop != is_backdrop {
+                render_bolt(w, connected);
+            }
+        });
         connect.set_child(Some(&bolt));
 
         let edit = gtk::Button::from_icon_name("document-edit-symbolic");

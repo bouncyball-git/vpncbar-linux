@@ -1,6 +1,7 @@
-// ComboBoxText is deprecated since GTK 4.10 in favour of DropDown, but is still
-// fully functional and far terser for these small enumerated fields. Migrating
-// to DropDown+StringList is a cosmetic follow-up.
+// The enumerated fields use gtk::DropDown (via the IdDropDown wrapper below).
+// They were ComboBoxText, but its popover grab swallowed the first click after
+// use — Save needed two clicks. Only oc_authgroup remains a ComboBoxText: it's
+// the editable (with-entry) variant, which DropDown doesn't offer.
 #![allow(deprecated)]
 
 //! Profile editor window — the GTK port of the macOS profile editor sheet.
@@ -62,17 +63,17 @@ struct Fields {
     // vpnc
     id: gtk::Entry,
     secret: gtk::PasswordEntry,
-    authmode: gtk::ComboBoxText,
+    authmode: IdDropDown,
     /// Shown when cert/hybrid is chosen on a vpnc built without GnuTLS.
     auth_note: gtk::Label,
     ca_file: gtk::Entry,
-    dh_group: gtk::ComboBoxText,
-    pfs: gtk::ComboBoxText,
-    nat_mode: gtk::ComboBoxText,
-    vendor: gtk::ComboBoxText,
+    dh_group: IdDropDown,
+    pfs: IdDropDown,
+    nat_mode: IdDropDown,
+    vendor: IdDropDown,
     mtu: gtk::Entry,
     dpd_timeout: gtk::Entry,
-    debug: gtk::ComboBoxText,
+    debug: IdDropDown,
     enable_weak: gtk::CheckButton,
     single_des: gtk::CheckButton,
     no_encryption: gtk::CheckButton,
@@ -81,12 +82,12 @@ struct Fields {
     oc_authgroup: gtk::ComboBoxText,
     oc_server_cert: gtk::Entry,
     oc_otp: gtk::CheckButton,
-    oc_protocol: gtk::ComboBoxText,
+    oc_protocol: IdDropDown,
     oc_no_dtls: gtk::CheckButton,
     oc_dpd: gtk::Entry,
     oc_mtu: gtk::Entry,
     oc_reconnect: gtk::Entry,
-    oc_debug: gtk::ComboBoxText,
+    oc_debug: IdDropDown,
     oc_fetch: gtk::Button,
     // Info / Debug tabs (display-only).
     info_label: gtk::Label,
@@ -133,26 +134,60 @@ fn entry(text: Option<&str>, placeholder: &str) -> gtk::Entry {
     e
 }
 
-fn combo(items: &[(&str, &str)], active: Option<&str>) -> gtk::ComboBoxText {
-    let c = gtk::ComboBoxText::new();
-    for (id, label) in items {
-        c.append(Some(id), label);
+/// Id-keyed wrapper over `gtk::DropDown`, mimicking ComboBoxText's id API.
+/// Derefs to the DropDown so widget ops (`set_sensitive`, `upcast_ref`, …)
+/// work unchanged at the call sites.
+#[derive(Clone)]
+struct IdDropDown {
+    dd: gtk::DropDown,
+    ids: Rc<Vec<String>>,
+}
+
+impl std::ops::Deref for IdDropDown {
+    type Target = gtk::DropDown;
+    fn deref(&self) -> &gtk::DropDown {
+        &self.dd
     }
-    c.set_active_id(active.or(items.first().map(|(id, _)| *id)));
-    c
+}
+
+impl IdDropDown {
+    fn new(items: &[(&str, &str)], active: Option<&str>) -> Self {
+        let labels: Vec<&str> = items.iter().map(|(_, l)| *l).collect();
+        let dd = gtk::DropDown::from_strings(&labels);
+        let ids = Rc::new(items.iter().map(|(id, _)| id.to_string()).collect::<Vec<_>>());
+        let me = IdDropDown { dd, ids };
+        me.set_active_id(active);
+        me
+    }
+
+    fn active_id(&self) -> Option<String> {
+        self.ids.get(self.dd.selected() as usize).cloned()
+    }
+
+    fn set_active_id(&self, id: Option<&str>) {
+        // Unlike ComboBox, a DropDown always has a selection; unknown → first.
+        let pos = id.and_then(|id| self.ids.iter().position(|x| x == id)).unwrap_or(0);
+        self.dd.set_selected(pos as u32);
+    }
+
+    fn connect_changed<F: Fn(&Self) + 'static>(&self, f: F) {
+        let me = self.clone();
+        self.dd.connect_selected_notify(move |_| f(&me));
+    }
+}
+
+fn combo(items: &[(&str, &str)], active: Option<&str>) -> IdDropDown {
+    IdDropDown::new(items, active.or(items.first().map(|(id, _)| *id)))
 }
 
 /// A dropdown whose first entry is an empty "(default)" choice, so leaving it
 /// alone omits the directive (matching the free-text "blank = backend default"
 /// behaviour) while still offering the valid values. `active` selects an
 /// existing value, else "(default)".
-fn combo_default(items: &[&str], active: Option<&str>) -> gtk::ComboBoxText {
-    let c = gtk::ComboBoxText::new();
-    c.append(Some(""), "(default)");
-    for it in items {
-        c.append(Some(it), it);
-    }
-    c.set_active_id(active.filter(|s| !s.is_empty()).or(Some("")));
+fn combo_default(items: &[&str], active: Option<&str>) -> IdDropDown {
+    let mut all: Vec<(&str, &str)> = vec![("", "(default)")];
+    all.extend(items.iter().map(|i| (*i, *i)));
+    let c = IdDropDown::new(&all, active.filter(|s| !s.is_empty()).or(Some("")));
     c.set_hexpand(true);
     c
 }
@@ -225,7 +260,7 @@ impl Editor {
         );
         type_combo.set_sensitive(is_new);
         type_bar.append(&type_label);
-        type_bar.append(&type_combo);
+        type_bar.append(&*type_combo);
         root.append(&type_bar);
 
         // Build all widgets.
@@ -882,7 +917,7 @@ fn build_pages(notebook: &gtk::Notebook, kind: &str, f: &Fields) {
 
         let opts = form_grid();
         let mut o = 0;
-        add_row(&opts, o, "Protocol", &f.oc_protocol);
+        add_row(&opts, o, "Protocol", &*f.oc_protocol);
         o += 1;
         add_row(&opts, o, "DPD (s)", &f.oc_dpd);
         o += 1;
@@ -890,7 +925,7 @@ fn build_pages(notebook: &gtk::Notebook, kind: &str, f: &Fields) {
         o += 1;
         add_row(&opts, o, "Reconnect (s)", &f.oc_reconnect);
         o += 1;
-        add_row(&opts, o, "Verbosity", &f.oc_debug);
+        add_row(&opts, o, "Verbosity", &*f.oc_debug);
         o += 1;
         opts.attach(&f.oc_no_dtls, 1, o, 1, 1);
 
@@ -907,7 +942,7 @@ fn build_pages(notebook: &gtk::Notebook, kind: &str, f: &Fields) {
         r += 1;
         add_row(&creds, r, "VPN domains", &f.domains);
         r += 1;
-        add_row(&creds, r, "IKE Authmode", &f.authmode);
+        add_row(&creds, r, "IKE Authmode", &*f.authmode);
         r += 1;
         add_row(&creds, r, "CA file", &f.ca_file);
         r += 1;
@@ -918,19 +953,19 @@ fn build_pages(notebook: &gtk::Notebook, kind: &str, f: &Fields) {
 
         let opts = form_grid();
         let mut o = 0;
-        add_row(&opts, o, "DH Group", &f.dh_group);
+        add_row(&opts, o, "DH Group", &*f.dh_group);
         o += 1;
-        add_row(&opts, o, "PFS", &f.pfs);
+        add_row(&opts, o, "PFS", &*f.pfs);
         o += 1;
-        add_row(&opts, o, "NAT-T Mode", &f.nat_mode);
+        add_row(&opts, o, "NAT-T Mode", &*f.nat_mode);
         o += 1;
-        add_row(&opts, o, "Vendor", &f.vendor);
+        add_row(&opts, o, "Vendor", &*f.vendor);
         o += 1;
         add_row(&opts, o, "Interface MTU", &f.mtu);
         o += 1;
         add_row(&opts, o, "DPD timeout (s)", &f.dpd_timeout);
         o += 1;
-        add_row(&opts, o, "Debug", &f.debug);
+        add_row(&opts, o, "Debug", &*f.debug);
         o += 1;
         opts.attach(&f.enable_weak, 1, o, 1, 1);
         o += 1;

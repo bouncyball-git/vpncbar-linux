@@ -15,8 +15,8 @@ use gtk::prelude::Cast;
 
 const LOCK_SVG: &str = include_str!("../packaging/lock.svg");
 
-/// Lightning-bolt outline (single fill path) for the VPN Manager connect button.
-const BOLT_PATH: &str = "M13 2 L3 14 L12 14 L11 22 L21 10 L12 10 Z";
+/// Slim lightning-bolt (single fill path) for the VPN Manager connect button.
+const BOLT_PATH: &str = "M14.5 1 L5 13 L10.5 13 L9 23 L19 10.5 L13.5 10.5 Z";
 
 /// Sizes we render so the host can pick the best fit for its panel / scale.
 /// Includes high-res entries so a HiDPI/scaled panel downscales a crisp source
@@ -86,7 +86,7 @@ pub fn bolt_texture(size: i32, fg: (f64, f64, f64), slash: bool) -> Option<gtk::
             cr.scale(scale, scale);
             cr.set_source_rgba(fg.0, fg.1, fg.2, 1.0);
             run_path(&cr, &toks);
-            let _ = cr.fill();
+            let _ = cr.fill(); // plain fill — sharp corners, no outline rounding
             cr.identity_matrix(); // back to device coords for the slash
         }
 
