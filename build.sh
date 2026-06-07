@@ -93,7 +93,14 @@ Usage: $0 [release|debug|pkg|clean|usage]
   release   optimized build (default)        -> target/release/vpncbar
   debug     fast unoptimized build           -> target/debug/vpncbar
   pkg       Arch/Manjaro package via makepkg -> packaging/arch/vpncbar-*.pkg.tar.zst
-  clean     remove cargo + makepkg build artifacts
+  clean [what [part]]   remove build artifacts:
+                   (none)               -> everything (cargo + packaging)
+                   release|debug        -> that profile's whole target dir
+                   release|debug deps   -> dependency cache only (keeps binary;
+                                           next build recompiles everything)
+                   release|debug app    -> app artifacts only (keeps dep cache;
+                                           next build is quick)
+                   pkg                  -> packaging/arch only
   usage     this help (also: -h, --help, help)
 
 Install afterwards with ./install.sh [release|debug], or for the package:
@@ -119,9 +126,52 @@ case "$PROFILE" in
         exit 0
         ;;
     clean)
-        echo "==> Cleaning build artifacts"
-        cargo clean
-        rm -rf packaging/arch
+        case "${2:-all}" in
+            all)
+                echo "==> Cleaning everything (cargo + packaging)"
+                cargo clean
+                rm -rf packaging/arch
+                ;;
+            release | debug)
+                if [ "$2" = release ]; then
+                    DIR=target/release
+                    PROF="--release"
+                else
+                    DIR=target/debug
+                    PROF="--profile dev"
+                fi
+                case "${3:-all}" in
+                    all)
+                        echo "==> Cleaning all $2 build artifacts"
+                        cargo clean $PROF
+                        ;;
+                    deps)
+                        # Drop the dependency cache but KEEP the final binary.
+                        # Next build recompiles everything from scratch.
+                        echo "==> Cleaning $2 dependency cache (keeping the binary)"
+                        rm -rf "$DIR/deps" "$DIR/build" "$DIR/.fingerprint" "$DIR/incremental"
+                        ;;
+                    app)
+                        # Drop only the app's own artifacts; the dependency
+                        # cache stays, so the next build is quick.
+                        echo "==> Cleaning $2 app artifacts (keeping the dependency cache)"
+                        cargo clean $PROF -p vpncbar-linux
+                        ;;
+                    *)
+                        usage >&2
+                        exit 1
+                        ;;
+                esac
+                ;;
+            pkg)
+                echo "==> Cleaning Arch packaging artifacts"
+                rm -rf packaging/arch
+                ;;
+            *)
+                usage >&2
+                exit 1
+                ;;
+        esac
         exit 0
         ;;
     *) usage >&2; exit 1 ;;
