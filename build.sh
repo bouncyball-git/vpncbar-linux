@@ -58,15 +58,19 @@ package() {
 EOF
     sed -i "s/@VERSION@/$PKGVER/" packaging/arch/PKGBUILD
     cat > packaging/arch/vpncbar.install <<'EOF'
-post_install() {
-    # Colour only under terminal pacman. GUI installers (pamac) don't render
-    # ANSI and would show the codes as garbage — detect the invoker via the
-    # parent process and stay plain there.
+# Colour only under terminal pacman. GUI installers (pamac) don't render ANSI
+# and would show the codes as garbage — detect the invoker via the parent
+# process and stay plain there.
+_vb_colors() {
     hi= off=
     if [ -r "/proc/$PPID/comm" ] && [ "$(cat /proc/$PPID/comm 2>/dev/null)" = pacman ]; then
         hi=$(printf '\033[1;38;5;208m') # bold orange
         off=$(printf '\033[0m')
     fi
+}
+
+post_install() {
+    _vb_colors
     cat <<MSG
 ==> GNOME users: the tray icon needs an SNI host. Install and enable:
         sudo pacman -S gnome-shell-extension-appindicator
@@ -92,6 +96,18 @@ pre_remove() {
     # its recorded state — no-op if nothing was changed. Runs while the script
     # is still installed.
     /usr/bin/vpncbar-setup restore || true
+}
+
+post_remove() {
+    _vb_colors
+    cat <<MSG
+${hi}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!  Your VPN profiles and stored secrets were KEPT.
+!!
+!!  For a full wipe:  rm -rf ~/.config/vpncbar  and clear 'vpnc-*'
+!!  items from your keyring.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${off}
+MSG
 }
 EOF
 }
