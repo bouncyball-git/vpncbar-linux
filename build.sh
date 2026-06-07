@@ -59,17 +59,27 @@ EOF
     sed -i "s/@VERSION@/$PKGVER/" packaging/arch/PKGBUILD
     cat > packaging/arch/vpncbar.install <<'EOF'
 post_install() {
-    cat <<'MSG'
-!! Finalize the installation (required) — joins you to the passwordless
-!! 'vpncbar' group and optionally configures split DNS:
-!!
-!!     sudo vpncbar-setup
-!!
-!! then log out/in once (or run: newgrp vpncbar).
-
+    # Colour only under terminal pacman. GUI installers (pamac) don't render
+    # ANSI and would show the codes as garbage — detect the invoker via the
+    # parent process and stay plain there.
+    hi= off=
+    if [ -r "/proc/$PPID/comm" ] && [ "$(cat /proc/$PPID/comm 2>/dev/null)" = pacman ]; then
+        hi=$(printf '\033[1;38;5;208m') # bold orange
+        off=$(printf '\033[0m')
+    fi
+    cat <<MSG
 ==> GNOME users: the tray icon needs an SNI host. Install and enable:
         sudo pacman -S gnome-shell-extension-appindicator
     (KDE Plasma, XFCE, Waybar etc. support it out of the box.)
+
+${hi}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!  FINALIZE THE INSTALLATION (required) — joins you to the
+!!  passwordless 'vpncbar' group, optionally configures split DNS:
+!!
+!!      sudo vpncbar-setup
+!!
+!!  then log out/in once (or run: newgrp vpncbar).
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${off}
 MSG
 }
 

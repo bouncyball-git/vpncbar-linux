@@ -96,15 +96,26 @@ pub fn show(parent: &gtk::Window, app: &Rc<App>) {
     gtk::prelude::GtkWindowExt::set_focus(&win, None::<&gtk::Widget>);
 }
 
-/// Ask, then disconnect all tunnels and remove the installed files (the system
-/// files via a polkit prompt). Profiles + stored secrets are kept.
+/// Ask, then disconnect all tunnels and uninstall. Detects how VpncBar was
+/// installed: a pacman-managed install is removed through the package manager
+/// (so the package DB stays consistent and its pre_remove hook runs); a script
+/// install is removed file by file. Profiles + stored secrets are kept either way.
 fn confirm_uninstall(parent: &gtk::Window, app: &Rc<App>) {
+    // Package-managed? Only a pacman install registers the 'vpncbar' package;
+    // script installs leave no owner. (Query needs no root; on non-Arch systems
+    // the missing pacman binary just fails the check → script path.)
+    let pkg_managed = crate::sys::run("/usr/bin/pacman", &["-Qq", "vpncbar"], None).ok();
+
+    let detail = if pkg_managed {
+        "This disconnects all tunnels and removes the vpncbar package via the \
+         package manager (pacman -R). Your saved profiles and stored secrets are kept."
+    } else {
+        "This disconnects all tunnels and removes the installed binary, helper script, \
+         polkit rule and launcher. Your saved profiles and stored secrets are kept."
+    };
     let dialog = gtk::AlertDialog::builder()
         .message("Uninstall VpncBar?")
-        .detail(
-            "This disconnects all tunnels and removes the installed binary, helper script, \
-             polkit rule and launcher. Your saved profiles and stored secrets are kept.",
-        )
+        .detail(detail)
         .buttons(["Cancel", "Uninstall"])
         .cancel_button(0)
         .default_button(0)
@@ -120,27 +131,33 @@ fn confirm_uninstall(parent: &gtk::Window, app: &Rc<App>) {
         }
         // Bring tunnels down while the validated helper is still installed.
         app.disconnect_all_sync();
-        // User-level autostart entry needs no privilege.
+        // User-level autostart entry needs no privilege (pacman doesn't track it either).
         if let Some(cfg) = dirs::config_dir() {
             let _ = std::fs::remove_file(cfg.join("autostart/io.github.vpncbar.desktop"));
             let _ = std::fs::remove_file(cfg.join("autostart/vpncbar.desktop"));
         }
-        // System files: one privileged shell (prompts for admin auth — /bin/sh
-        // isn't covered by the passwordless rule, which is intentional).
-        // Undo what vpncbar-setup changed (group memberships it added, DNS),
-        // from its recorded state, while the setup script is still installed.
-        let script = "/usr/bin/vpncbar-setup restore 2>/dev/null; \
-             rm -f /usr/bin/vpncbar \
-             /usr/bin/vpncbar-setup \
-             /usr/lib/vpncbar/vpncbar-script \
-             /usr/lib/vpncbar/vpncbar-disconnect \
-             /etc/polkit-1/rules.d/10-vpncbar.rules \
-             /usr/share/applications/io.github.vpncbar.desktop \
-             /usr/share/applications/vpncbar.desktop \
-             /usr/share/icons/hicolor/scalable/apps/io.github.vpncbar.svg \
-             /usr/share/icons/hicolor/scalable/apps/vpncbar.svg; \
-             rmdir /usr/lib/vpncbar 2>/dev/null; exit 0";
-        let r = crate::privilege::run_root("/bin/sh", &["-c", script], None);
+        // Privileged step (prompts for admin auth — neither /bin/sh nor pacman
+        // is covered by the passwordless rule, which is intentional).
+        let r = if pkg_managed {
+            // The package's pre_remove hook runs `vpncbar-setup restore` and
+            // pacman removes every tracked file + refreshes caches itself.
+            crate::privilege::run_root("/usr/bin/pacman", &["-R", "--noconfirm", "vpncbar"], None)
+        } else {
+            // Undo what vpncbar-setup changed (group memberships it added, DNS),
+            // from its recorded state, while the setup script is still installed.
+            let script = "/usr/bin/vpncbar-setup restore 2>/dev/null; \
+                 rm -f /usr/bin/vpncbar \
+                 /usr/bin/vpncbar-setup \
+                 /usr/lib/vpncbar/vpncbar-script \
+                 /usr/lib/vpncbar/vpncbar-disconnect \
+                 /etc/polkit-1/rules.d/10-vpncbar.rules \
+                 /usr/share/applications/io.github.vpncbar.desktop \
+                 /usr/share/applications/vpncbar.desktop \
+                 /usr/share/icons/hicolor/scalable/apps/io.github.vpncbar.svg \
+                 /usr/share/icons/hicolor/scalable/apps/vpncbar.svg; \
+                 rmdir /usr/lib/vpncbar 2>/dev/null; exit 0";
+            crate::privilege::run_root("/bin/sh", &["-c", script], None)
+        };
         if r.ok() {
             std::process::exit(0);
         }
