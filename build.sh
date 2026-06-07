@@ -42,6 +42,7 @@ build() {
 package() {
     cd "$_repo"
     install -Dm755 target/release/vpncbar           "$pkgdir/usr/bin/vpncbar"
+    install -Dm755 packaging/vpncbar-setup          "$pkgdir/usr/bin/vpncbar-setup"
     install -Dm755 packaging/vpncbar-script         "$pkgdir/usr/lib/vpncbar/vpncbar-script"
     install -Dm755 packaging/vpncbar-disconnect     "$pkgdir/usr/lib/vpncbar/vpncbar-disconnect"
     # Vendor rules dir (packages use /usr/share, admins use /etc; polkit reads both).
@@ -59,23 +60,28 @@ EOF
     cat > packaging/arch/vpncbar.install <<'EOF'
 post_install() {
     cat <<'MSG'
-==> For passwordless connect/disconnect, add yourself to the 'vpncbar' group:
-        sudo gpasswd -a $USER vpncbar
-    then log out/in once (or run: newgrp vpncbar).
+!! Finalize the installation (required) — joins you to the passwordless
+!! 'vpncbar' group and optionally configures split DNS:
+!!
+!!     sudo vpncbar-setup
+!!
+!! then log out/in once (or run: newgrp vpncbar).
 
 ==> GNOME users: the tray icon needs an SNI host. Install and enable:
         sudo pacman -S gnome-shell-extension-appindicator
     (KDE Plasma, XFCE, Waybar etc. support it out of the box.)
-
-==> Split DNS needs systemd-resolved as the system resolver:
-        systemctl enable --now systemd-resolved
-        ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
-    and NetworkManager set to dns=systemd-resolved.
 MSG
 }
 
 post_upgrade() {
     true
+}
+
+pre_remove() {
+    # Undo what vpncbar-setup changed (group memberships it added, DNS), from
+    # its recorded state — no-op if nothing was changed. Runs while the script
+    # is still installed.
+    /usr/bin/vpncbar-setup restore || true
 }
 EOF
 }

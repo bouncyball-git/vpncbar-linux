@@ -127,7 +127,11 @@ fn confirm_uninstall(parent: &gtk::Window, app: &Rc<App>) {
         }
         // System files: one privileged shell (prompts for admin auth — /bin/sh
         // isn't covered by the passwordless rule, which is intentional).
-        let script = "rm -f /usr/bin/vpncbar \
+        // Undo what vpncbar-setup changed (group memberships it added, DNS),
+        // from its recorded state, while the setup script is still installed.
+        let script = "/usr/bin/vpncbar-setup restore 2>/dev/null; \
+             rm -f /usr/bin/vpncbar \
+             /usr/bin/vpncbar-setup \
              /usr/lib/vpncbar/vpncbar-script \
              /usr/lib/vpncbar/vpncbar-disconnect \
              /etc/polkit-1/rules.d/10-vpncbar.rules \

@@ -47,10 +47,11 @@ sudo pacman -S --needed rust gtk4 vpnc openconnect libsecret polkit
 ## Build & install
 
 ```sh
-./build.sh          # release build (or: ./build.sh debug)
-./install.sh        # installs binary + script + polkit rule + .desktop
-                    # and adds you to the passwordless 'vpncbar' group
-                    # (or: ./install.sh debug to install the debug build)
+./build.sh          # release build (or: ./build.sh debug | pkg | clean)
+./install.sh        # installs binary + helpers + polkit rule + .desktop, then
+                    # runs vpncbar-setup (passwordless 'vpncbar' group +
+                    # optional split DNS). Pacman users run it manually:
+                    # sudo vpncbar-setup
 ```
 
 Log out/in (or `newgrp vpncbar`) once, so connecting/disconnecting won't prompt for

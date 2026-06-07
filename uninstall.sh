@@ -4,9 +4,17 @@
 set -e
 
 PREFIX=/usr
+
+# Undo what vpncbar-setup changed (group memberships it added, DNS settings),
+# from its recorded state — must run before the script itself is removed.
+if [ -x "$PREFIX/bin/vpncbar-setup" ]; then
+    sudo "$PREFIX/bin/vpncbar-setup" restore || true
+fi
+
 echo "==> Removing installed files (sudo)"
 sudo rm -f \
     "$PREFIX/bin/vpncbar" \
+    "$PREFIX/bin/vpncbar-setup" \
     "$PREFIX/lib/vpncbar/vpncbar-script" \
     "$PREFIX/lib/vpncbar/vpncbar-disconnect" \
     /etc/polkit-1/rules.d/10-vpncbar.rules \
@@ -19,8 +27,8 @@ rm -f ~/.config/autostart/io.github.vpncbar.desktop ~/.config/autostart/vpncbar.
 sudo gtk-update-icon-cache -qtf "$PREFIX/share/icons/hicolor" 2>/dev/null || true
 kbuildsycoca6 >/dev/null 2>&1 || kbuildsycoca5 >/dev/null 2>&1 || true
 
-echo "==> Leaving the 'vpncbar' group in place (remove manually if desired:"
-echo "    sudo gpasswd -d \$USER vpncbar ; sudo groupdel vpncbar )"
+# (group memberships, the group itself if empty, and DNS settings were
+#  restored above by 'vpncbar-setup restore')
 echo
 echo "Your profiles (~/.config/vpncbar) and stored secrets are kept."
 echo "For a full wipe:  rm -rf ~/.config/vpncbar  and clear 'vpnc-*' items from your keyring."

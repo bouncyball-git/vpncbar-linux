@@ -1,0 +1,204 @@
+#!/bin/sh
+# vpncbar-setup — finalize a VpncBar installation (run once, as root):
+#     sudo vpncbar-setup [user]
+#
+#  1. Ensures the 'vpncbar' group exists and adds <user> to it (default: the
+#     user who invoked sudo). Membership grants passwordless vpnc/openconnect
+#     via the installed polkit rule — an authorization decision, which is why
+#     this is a conscious admin command and not a package side effect.
+#  2. Offers to configure split DNS: systemd-resolved as the system resolver
+#     and NetworkManager handing DNS to it (required for per-domain VPN DNS).
+#
+# Everything it changes is recorded in /var/lib/vpncbar (group members it
+# added, the pre-change DNS state) and undone with:
+#     sudo vpncbar-setup restore
+# (the uninstallers run this automatically). The group itself is also removed
+# then — but only if it's empty; independently-added members keep it alive.
+#
+# Idempotent — safe to re-run. Changes nothing without telling you.
+set -e
+
+STATE_DIR=/var/lib/vpncbar
+STATE="$STATE_DIR/dns-state"
+ADDED="$STATE_DIR/group-added"
+NM_CONF=/etc/NetworkManager/conf.d/10-vpncbar-dns.conf
+
+if [ "$(id -u)" != 0 ]; then
+    echo "Run as root:  sudo vpncbar-setup [user|restore]" >&2
+    exit 1
+fi
+
+# Snapshot the DNS state ONCE, just before the first change. A re-run after we
+# already configured things must not overwrite the true original.
+record_dns_state() {
+    if [ -f "$STATE" ]; then
+        return 0
+    fi
+    mkdir -p "$STATE_DIR"
+    if [ -L /etc/resolv.conf ]; then
+        resolv_type=symlink
+        resolv_target=$(readlink /etc/resolv.conf)
+    elif [ -f /etc/resolv.conf ]; then
+        resolv_type=file
+        resolv_target=
+        cp -p /etc/resolv.conf "$STATE_DIR/resolv.conf.orig"
+    else
+        resolv_type=none
+        resolv_target=
+    fi
+    {
+        echo "resolved_enabled=$(systemctl is-enabled systemd-resolved 2>/dev/null || true)"
+        echo "resolved_active=$(systemctl is-active systemd-resolved 2>/dev/null || true)"
+        echo "resolv_type=$resolv_type"
+        echo "resolv_target=$resolv_target"
+    } > "$STATE"
+}
+
+# Put DNS back the way it was before vpncbar-setup touched it.
+restore_dns() {
+    if [ ! -f "$STATE" ]; then
+        echo "No recorded DNS state — vpncbar-setup never changed DNS; nothing to restore."
+        return 0
+    fi
+    echo "==> Restoring the DNS configuration recorded before vpncbar-setup changed it"
+    . "$STATE"
+    rm -f "$NM_CONF"
+    case "$resolv_type" in
+        symlink)
+            ln -sf "$resolv_target" /etc/resolv.conf
+            ;;
+        file)
+            if [ -f "$STATE_DIR/resolv.conf.orig" ]; then
+                cp -p "$STATE_DIR/resolv.conf.orig" /etc/resolv.conf
+            else
+                rm -f /etc/resolv.conf # NetworkManager regenerates it
+            fi
+            ;;
+        none)
+            rm -f /etc/resolv.conf
+            ;;
+    esac
+    if [ "$resolved_active" != active ]; then
+        systemctl stop systemd-resolved 2>/dev/null || true
+    fi
+    if [ "$resolved_enabled" != enabled ]; then
+        systemctl disable systemd-resolved 2>/dev/null || true
+    fi
+    systemctl try-restart NetworkManager 2>/dev/null || true
+    rm -f "$STATE" "$STATE_DIR/resolv.conf.orig"
+    rmdir "$STATE_DIR" 2>/dev/null || true
+    echo "    Done — resolved/resolv.conf/NetworkManager back to their prior state."
+}
+
+# Remove ONLY the memberships this script added (recorded at gpasswd time) —
+# pre-existing members are untouched. Then drop the group itself, but only if
+# it ended up empty: members an admin added independently keep it alive.
+restore_group() {
+    if [ -f "$ADDED" ]; then
+        echo "==> Removing the 'vpncbar' memberships vpncbar-setup added"
+        while read -r u; do
+            if [ -n "$u" ] && id -nG "$u" 2>/dev/null | tr ' ' '\n' | grep -qx vpncbar; then
+                gpasswd -d "$u" vpncbar || true
+            fi
+        done < "$ADDED"
+        rm -f "$ADDED"
+        rmdir "$STATE_DIR" 2>/dev/null || true
+    fi
+    if getent group vpncbar >/dev/null; then
+        members=$(getent group vpncbar | cut -d: -f4)
+        if [ -z "$members" ]; then
+            groupdel vpncbar 2>/dev/null || true
+            echo "    Removed the now-empty 'vpncbar' group."
+        else
+            echo "    Keeping the 'vpncbar' group — it still has members: $members"
+        fi
+    fi
+}
+
+case "$1" in
+    restore)
+        restore_group
+        restore_dns
+        exit 0
+        ;;
+    restore-dns) # kept for compatibility
+        restore_dns
+        exit 0
+        ;;
+esac
+
+TARGET="${1:-$SUDO_USER}"
+if [ -z "$TARGET" ] || [ "$TARGET" = root ]; then
+    echo "Can't infer the target user — pass it explicitly:" >&2
+    echo "    vpncbar-setup <user>" >&2
+    exit 1
+fi
+if ! id "$TARGET" >/dev/null 2>&1; then
+    echo "No such user: $TARGET" >&2
+    exit 1
+fi
+
+echo "==> Group 'vpncbar' (passwordless connect/disconnect via polkit)"
+if ! getent group vpncbar >/dev/null; then
+    groupadd -r vpncbar
+fi
+if id -nG "$TARGET" | tr ' ' '\n' | grep -qx vpncbar; then
+    echo "    $TARGET is already a member."
+else
+    gpasswd -a "$TARGET" vpncbar
+    # Record that WE added this membership, so uninstall removes exactly it
+    # (and never strips members an admin added independently).
+    mkdir -p "$STATE_DIR"
+    if [ ! -f "$ADDED" ] || ! grep -qx "$TARGET" "$ADDED"; then
+        echo "$TARGET" >> "$ADDED"
+    fi
+    echo "    $TARGET added — log out/in once (or run: newgrp vpncbar) to take effect."
+fi
+
+echo
+echo "==> Split DNS (systemd-resolved + NetworkManager)"
+
+stub_ok=no
+if [ "$(readlink -f /etc/resolv.conf 2>/dev/null)" = "/run/systemd/resolve/stub-resolv.conf" ]; then
+    stub_ok=yes
+fi
+resolved_ok=no
+if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+    resolved_ok=yes
+fi
+if [ "$stub_ok" = yes ] && [ "$resolved_ok" = yes ] && [ -f "$NM_CONF" ]; then
+    echo "    Already configured — nothing to do."
+    exit 0
+fi
+
+# Don't fight an explicit existing dns= choice in NetworkManager.
+existing=$(grep -hs '^dns=' /etc/NetworkManager/NetworkManager.conf \
+    /etc/NetworkManager/conf.d/*.conf 2>/dev/null | grep -v '^dns=systemd-resolved' | head -n1)
+if [ -n "$existing" ]; then
+    echo "    ! NetworkManager already sets '$existing' — leaving DNS alone."
+    echo "      Remove that setting and re-run vpncbar-setup to switch."
+    exit 0
+fi
+
+echo "    This routes system DNS through systemd-resolved (needed for split DNS):"
+echo "      - systemctl enable --now systemd-resolved"
+echo "      - /etc/resolv.conf -> /run/systemd/resolve/stub-resolv.conf"
+echo "      - NetworkManager: dns=systemd-resolved ($NM_CONF)"
+echo "    The current state is recorded first; undo with: sudo vpncbar-setup restore-dns"
+printf "    Proceed? [y/N] "
+read -r ans
+case "$ans" in
+    y | Y | yes | YES) ;;
+    *)
+        echo "    Skipped — split DNS won't work until configured. Re-run any time."
+        exit 0
+        ;;
+esac
+
+record_dns_state
+systemctl enable --now systemd-resolved
+ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+mkdir -p /etc/NetworkManager/conf.d
+printf '[main]\ndns=systemd-resolved\n' > "$NM_CONF"
+systemctl try-restart NetworkManager 2>/dev/null || true
+echo "    Done — resolved active, stub resolv.conf, NetworkManager updated."

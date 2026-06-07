@@ -14,8 +14,9 @@ Usage: $0 [release|debug|usage]
   usage     this help (also: -h, --help, help)
 
 Build first with ./build.sh [release|debug]. Also installs the helper script,
-disconnect helper, polkit rule, .desktop entry + icon, and sets up the
-passwordless 'vpncbar' group. Uninstall with ./uninstall.sh.
+disconnect helper, polkit rule, .desktop entry + icon, and vpncbar-setup —
+then runs vpncbar-setup for you (group membership + optional split DNS).
+Uninstall with ./uninstall.sh.
 EOF
 }
 
@@ -39,7 +40,6 @@ APP_ID=io.github.vpncbar
 POLKIT=/etc/polkit-1/rules.d/10-vpncbar.rules
 DESKTOP="$PREFIX/share/applications/$APP_ID.desktop"
 ICON="$PREFIX/share/icons/hicolor/scalable/apps/$APP_ID.svg"
-GROUP=vpncbar
 
 echo "==> Checking runtime dependencies"
 missing=
@@ -63,6 +63,7 @@ echo "==> Installing $PROFILE binary (sudo)"
 sudo install -Dm755 "$BINARY"                    "$BIN"
 sudo install -Dm755 packaging/vpncbar-script     "$LIBDIR/vpncbar-script"
 sudo install -Dm755 packaging/vpncbar-disconnect "$LIBDIR/vpncbar-disconnect"
+sudo install -Dm755 packaging/vpncbar-setup      "$PREFIX/bin/vpncbar-setup"
 sudo install -Dm644 packaging/10-vpncbar.rules   "$POLKIT"
 sudo install -Dm644 packaging/$APP_ID.desktop    "$DESKTOP"
 sudo install -Dm644 packaging/lock.svg           "$ICON"   # lock = app icon
@@ -78,12 +79,8 @@ sudo update-desktop-database "$PREFIX/share/applications" 2>/dev/null || true
 rm -f "$HOME/.cache/icon-cache.kcache" 2>/dev/null || true
 kbuildsycoca6 >/dev/null 2>&1 || kbuildsycoca5 >/dev/null 2>&1 || true
 
-echo "==> Setting up passwordless polkit group '$GROUP'"
-getent group "$GROUP" >/dev/null || sudo groupadd -r "$GROUP"
-if ! id -nG "$USER" | tr ' ' '\n' | grep -qx "$GROUP"; then
-    sudo gpasswd -a "$USER" "$GROUP"
-    echo "   Added $USER to '$GROUP' — log out/in (or run 'newgrp $GROUP') for it to take effect."
-fi
+echo "==> Finalizing (vpncbar-setup: group membership + optional split DNS)"
+sudo "$PREFIX/bin/vpncbar-setup" "$USER"
 
 echo
 echo "Done. Launch from your menu (VpncBar) or run: vpncbar"
