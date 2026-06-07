@@ -47,18 +47,45 @@ sudo pacman -S --needed rust gtk4 vpnc openconnect libsecret polkit
 ## Build & install
 
 ```sh
-./build.sh          # release build (or: ./build.sh debug | pkg | clean)
-./install.sh        # installs binary + helpers + polkit rule + .desktop, then
-                    # runs vpncbar-setup (passwordless 'vpncbar' group +
-                    # optional split DNS). Pacman users run it manually:
-                    # sudo vpncbar-setup
+./build.sh          # release build
+./install.sh        # installs binary + helpers + polkit rule + .desktop,
+                    # then runs vpncbar-setup for you
 ```
 
-Log out/in (or `newgrp vpncbar`) once, so connecting/disconnecting won't prompt for
-a password. Then launch **VpncBar** from your app menu, or run `vpncbar`. To start
-it on login: `cp /usr/share/applications/vpncbar.desktop ~/.config/autostart/`.
+`vpncbar-setup` joins you to the passwordless **`vpncbar`** group and — after an
+explicit prompt — configures **split DNS** (systemd-resolved as the system
+resolver, NetworkManager handing DNS to it). Everything it changes is recorded
+in `/var/lib/vpncbar` and **automatically restored on uninstall**. Log out/in
+once (or `newgrp vpncbar`) so connecting won't prompt for a password.
 
-Uninstall with `./uninstall.sh` (keeps your profiles + secrets).
+Launch **VpncBar** from your app menu, or run `vpncbar`. To start it on login:
+`cp /usr/share/applications/io.github.vpncbar.desktop ~/.config/autostart/`.
+
+Uninstall with `./uninstall.sh` — removes the installed files and automatically
+undoes what `vpncbar-setup` changed (group memberships it added, the group if
+left empty, DNS settings). Profiles + secrets are kept.
+
+### Arch/Manjaro package
+
+```sh
+./build.sh pkg                                        # builds the package via makepkg
+sudo pacman -U packaging/arch/vpncbar-*.pkg.tar.zst   # deps resolved automatically
+sudo vpncbar-setup                                    # finalize (manual on this path)
+```
+
+Upgrade by rebuilding and `pacman -U` again; remove with `sudo pacman -R vpncbar`
+(the pre-remove hook runs the same automatic restore). If VpncBar was previously
+installed via `install.sh`, run `./uninstall.sh` once before the first `pacman -U`.
+
+### Script options
+
+```sh
+./build.sh   [release|debug|pkg|clean|usage]   # clean takes: release|debug [deps|app] | pkg
+./install.sh [release|debug|usage]
+```
+
+Run either with `usage` for the full matrix (e.g. `./build.sh clean debug deps`
+drops only the debug dependency cache, keeping the binary).
 
 ### Running uninstalled (development)
 
@@ -79,8 +106,8 @@ cargo run -- disconnect <name>
 1. Tray icon → **Open VpncBar…** → **Add VPN…** (or **Import…** a `.pcf`/`.conf`).
 2. Pick the **Type** — *Cisco IPSec (vpnc)* or *AnyConnect (openconnect)*; for
    openconnect use **Fetch groups** to fill the group list and auto-detect 2FA.
-3. **Click a profile row** to connect; click again to disconnect. The row shows a
-   ✓ and a live elapsed timer while up.
+3. Click a profile's **lightning button** to connect; while up it shows a slashed
+   bolt — click again to disconnect. The row shows a ✓ and a live elapsed timer.
 4. The **edit** (pencil) button opens the editor (Credentials / Options / Info /
    Debug + a Connect/Disconnect button). The trash button removes the profile.
 5. Left-clicking the tray icon opens the window; the tray menu does quick
@@ -94,7 +121,8 @@ cargo run -- disconnect <name>
 | Pidfiles + per-session logs | `~/.config/vpncbar/run/` |
 | Live tunnel info (Info tab) | `/run/vpncbar/<uuid>.info` (written by the vpnc-script) |
 | Secrets | Secret Service, items `vpnc-<uuid>-secret` / `…-password` |
-| Installed files | `/usr/bin/vpncbar`, `/usr/lib/vpncbar/`, `/etc/polkit-1/rules.d/10-vpncbar.rules` |
+| vpncbar-setup state (for uninstall restore) | `/var/lib/vpncbar/` |
+| Installed files | `/usr/bin/{vpncbar,vpncbar-setup}`, `/usr/lib/vpncbar/`, `/etc/polkit-1/rules.d/10-vpncbar.rules` (pacman package: `/usr/share/polkit-1/rules.d/`) |
 
 ## Security notes
 
