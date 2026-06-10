@@ -1,7 +1,7 @@
 // The enumerated fields use gtk::DropDown (via the IdDropDown wrapper below).
 // They were ComboBoxText, but its popover grab swallowed the first click after
-// use — Save needed two clicks. Only oc_authgroup remains a ComboBoxText: it's
-// the editable (with-entry) variant, which DropDown doesn't offer.
+// use — Save/Connect needed two clicks. The auth group (which must stay editable)
+// is now an Entry plus a MenuButton popover picker, so no ComboBoxText remains.
 #![allow(deprecated)]
 
 //! Profile editor window — the GTK port of the macOS profile editor sheet.
@@ -91,9 +91,12 @@ struct Fields {
     no_encryption: gtk::CheckButton,
     weak_auth: gtk::CheckButton,
     // openconnect
-    oc_authgroup: gtk::ComboBoxText,
+    // Editable group field + a dropdown button that lists fetched groups. (Was a
+    // ComboBoxText, but its popover grab swallowed the first click on Connect/Save
+    // after a selection — see header. An Entry + MenuButton popover avoids that.)
+    oc_authgroup: gtk::Entry,
+    oc_group_pick: gtk::MenuButton,
     oc_server_cert: gtk::Entry,
-    oc_otp: gtk::CheckButton,
     oc_protocol: IdDropDown,
     oc_no_dtls: gtk::CheckButton,
     oc_dpd: gtk::Entry,
@@ -373,16 +376,21 @@ impl Editor {
             no_encryption: gtk::CheckButton::with_label("Enable no encryption"),
             weak_auth: gtk::CheckButton::with_label("Enable weak authentication"),
             oc_authgroup: {
-                let c = gtk::ComboBoxText::with_entry();
-                if let Some(g) = ne(p.oc_authgroup.as_deref()) {
-                    c.append(Some(&g), &g);
-                    c.set_active_id(Some(&g));
-                }
-                c.set_hexpand(true);
-                c
+                let e = entry(p.oc_authgroup.as_deref(), "group name");
+                e.set_hexpand(true);
+                e
+            },
+            oc_group_pick: {
+                // Drop-down arrow; its popover (the fetched group list) is filled
+                // by Fetch groups. Insensitive until there's something to pick.
+                let mb = gtk::MenuButton::builder()
+                    .icon_name("pan-down-symbolic")
+                    .tooltip_text("Pick a fetched group")
+                    .sensitive(false)
+                    .build();
+                mb
             },
             oc_server_cert: entry(p.oc_server_cert.as_deref(), "pin-sha256:… (optional)"),
-            oc_otp: gtk::CheckButton::with_label("Ask for one-time code (2FA)"),
             oc_protocol: combo(
                 &[
                     ("anyconnect", "anyconnect"), ("gp", "gp"), ("pulse", "pulse"),
@@ -424,7 +432,6 @@ impl Editor {
         fields.single_des.set_active(p.single_des.unwrap_or(false));
         fields.no_encryption.set_active(p.no_encryption.unwrap_or(false));
         fields.weak_auth.set_active(p.weak_auth.unwrap_or(false));
-        fields.oc_otp.set_active(p.oc_otp.unwrap_or(false));
         fields.oc_no_dtls.set_active(p.oc_no_dtls.unwrap_or(false));
 
         // Notebook with per-type pages.
@@ -504,17 +511,19 @@ impl Editor {
             let ed = ed.clone();
             ed.clone().fields.oc_fetch.connect_clicked(move |_| ed.fetch_groups());
         }
-        // Selecting a group auto-ticks "Ask for one-time code" when it needs 2FA.
-        {
-            let ed = ed.clone();
-            ed.clone().fields.oc_authgroup.connect_changed(move |c| {
-                if let Some(g) = c.active_text() {
-                    if let Some(needs) = ed.groups.borrow().get(g.as_str()) {
-                        ed.fields.oc_otp.set_active(*needs);
-                    }
+        // Pin the Fetch button to its natural width (measured once realized, with
+        // its default "Fetch groups" label) so swapping to the shorter "Fetching…"
+        // can't shrink it and jiggle the Auth-group row.
+        ed.fields.oc_fetch.connect_realize(|b| {
+            if b.width_request() <= 0 {
+                let nat = b.measure(gtk::Orientation::Horizontal, -1).1;
+                if nat > 0 {
+                    b.set_width_request(nat);
                 }
-            });
-        }
+            }
+        });
+        // No 2FA checkbox: whether to prompt for a one-time code is derived from
+        // the selected group's 2FA flag at connect/save time (see `needs_otp`).
         {
             let ed = ed.clone();
             ed.clone().fields.debug_clear.connect_clicked(move |_| ed.clear_log());
@@ -638,26 +647,77 @@ impl Editor {
             }
 
             let groups = probe.groups;
-            let combo = &ed.fields.oc_authgroup;
-            let current = combo.active_text().map(|s| s.to_string());
-            combo.remove_all();
-            let mut map = ed.groups.borrow_mut();
-            map.clear();
-            for (g, otp) in &groups {
-                combo.append(Some(g), g);
-                map.insert(g.clone(), *otp);
+            {
+                let mut map = ed.groups.borrow_mut();
+                map.clear();
+                for (g, otp) in &groups {
+                    map.insert(g.clone(), *otp);
+                }
             }
-            drop(map);
-            // Restore prior selection if still present, else pick the first.
-            if let Some(cur) = current.filter(|c| groups.iter().any(|(g, _)| g == c)) {
-                combo.set_active_id(Some(&cur));
-            } else if let Some((g, _)) = groups.first() {
-                combo.set_active_id(Some(g));
+
+            // Keep the current text if it's still a known group, else select the
+            // first (matches the old combo behaviour).
+            let current = ed.fields.oc_authgroup.text().to_string();
+            if !groups.iter().any(|(g, _)| *g == current) {
+                if let Some((g, _)) = groups.first() {
+                    ed.fields.oc_authgroup.set_text(g);
+                }
             }
+
+            // Rebuild the dropdown popover from the fetched groups.
+            ed.populate_group_picker(&groups);
+
             if groups.is_empty() {
                 crate::notify::notify("VpncBar", "No groups returned (check the gateway/cert).");
             }
         });
+    }
+
+    /// Fill the group-picker dropdown (the MenuButton popover) from a fetched
+    /// list. Activating a row sets the auth-group entry and closes the popover —
+    /// a plain popover dismisses cleanly, without the ComboBoxText grab bug.
+    fn populate_group_picker(&self, groups: &[(String, bool)]) {
+        let pick = &self.fields.oc_group_pick;
+        if groups.is_empty() {
+            pick.set_popover(None::<&gtk::Popover>);
+            pick.set_sensitive(false);
+            return;
+        }
+        let list = gtk::ListBox::new();
+        list.set_selection_mode(gtk::SelectionMode::None);
+        for (g, otp) in groups {
+            let text = if *otp { format!("{g}    (2FA)") } else { g.clone() };
+            let lbl = gtk::Label::new(Some(&text));
+            lbl.set_xalign(0.0);
+            lbl.set_margin_top(4);
+            lbl.set_margin_bottom(4);
+            lbl.set_margin_start(8);
+            lbl.set_margin_end(8);
+            let row = gtk::ListBoxRow::new();
+            row.set_child(Some(&lbl));
+            list.append(&row);
+        }
+        let scroll = gtk::ScrolledWindow::builder()
+            .child(&list)
+            .propagate_natural_height(true)
+            .propagate_natural_width(true)
+            .max_content_height(320)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .build();
+        let popover = gtk::Popover::builder().child(&scroll).build();
+
+        let names: Vec<String> = groups.iter().map(|(g, _)| g.clone()).collect();
+        let entry = self.fields.oc_authgroup.clone();
+        let pop = popover.clone();
+        list.connect_row_activated(move |_, row| {
+            if let Some(name) = names.get(row.index() as usize) {
+                entry.set_text(name);
+            }
+            pop.popdown();
+        });
+
+        pick.set_popover(Some(&popover));
+        pick.set_sensitive(true);
     }
 
     fn update_info_debug(&self) {
@@ -841,6 +901,18 @@ impl Editor {
         self.connect_btn.set_sensitive(p.uuid.is_some() || !self.fields.name.text().is_empty());
     }
 
+    /// Whether the currently-selected openconnect group needs a 2FA code. Uses the
+    /// last Fetch groups result; for a group not fetched this session (typed by
+    /// hand, or the editor opened without fetching) it keeps the profile's saved
+    /// value. Replaces the old "Ask for one-time code" checkbox.
+    fn needs_otp(&self) -> bool {
+        let group = self.fields.oc_authgroup.text().trim().to_string();
+        match self.groups.borrow().get(group.as_str()) {
+            Some(need) => *need,
+            None => self.profile.borrow().oc_otp.unwrap_or(false),
+        }
+    }
+
     fn toggle_connection(&self) {
         // Persist first so we connect what's on screen (and validate).
         if !self.save() {
@@ -919,9 +991,10 @@ impl Editor {
             p.weak_auth = Some(f.weak_auth.is_active());
         } else {
             // openconnect: id unused; authgroup carries the group.
-            p.oc_authgroup = ne(f.oc_authgroup.active_text().as_deref());
+            p.oc_authgroup = ne(Some(&f.oc_authgroup.text()));
             p.oc_server_cert = ne(Some(&f.oc_server_cert.text()));
-            p.oc_otp = Some(f.oc_otp.is_active());
+            // 2FA is derived from the selected group, not a checkbox.
+            p.oc_otp = self.needs_otp().then_some(true);
             p.oc_protocol = f.oc_protocol.active_id().map(|s| s.to_string());
             p.oc_no_dtls = Some(f.oc_no_dtls.is_active());
             p.oc_dpd = ne(Some(&f.oc_dpd.text()));
@@ -966,8 +1039,9 @@ fn build_pages(notebook: &gtk::Notebook, kind: &str, f: &Fields) {
         f.pfs.upcast_ref(), f.nat_mode.upcast_ref(), f.vendor.upcast_ref(),
         f.mtu.upcast_ref(), f.dpd_timeout.upcast_ref(), f.debug.upcast_ref(),
         f.enable_weak.upcast_ref(), f.single_des.upcast_ref(), f.no_encryption.upcast_ref(),
-        f.weak_auth.upcast_ref(), f.oc_authgroup.upcast_ref(), f.oc_fetch.upcast_ref(),
-        f.oc_server_cert.upcast_ref(), f.oc_otp.upcast_ref(), f.oc_protocol.upcast_ref(),
+        f.weak_auth.upcast_ref(), f.oc_authgroup.upcast_ref(), f.oc_group_pick.upcast_ref(),
+        f.oc_fetch.upcast_ref(),
+        f.oc_server_cert.upcast_ref(), f.oc_protocol.upcast_ref(),
         f.oc_no_dtls.upcast_ref(), f.oc_dpd.upcast_ref(), f.oc_mtu.upcast_ref(),
         f.oc_reconnect.upcast_ref(), f.oc_debug.upcast_ref(),
     ];
@@ -984,6 +1058,7 @@ fn build_pages(notebook: &gtk::Notebook, kind: &str, f: &Fields) {
     if kind == "openconnect" {
         let group_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         group_box.append(&f.oc_authgroup);
+        group_box.append(&f.oc_group_pick);
         group_box.append(&f.oc_fetch);
         add_row(&creds, r, "Auth group", &group_box);
         r += 1;
@@ -992,8 +1067,6 @@ fn build_pages(notebook: &gtk::Notebook, kind: &str, f: &Fields) {
         add_row(&creds, r, "Password", &f.password);
         r += 1;
         add_row(&creds, r, "VPN domains", &f.domains);
-        r += 1;
-        creds.attach(&f.oc_otp, 1, r, 1, 1);
         r += 1;
 
         // Cert fields live behind an "Advanced" disclosure (expanded if set).
