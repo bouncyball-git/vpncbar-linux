@@ -26,10 +26,10 @@ impl Tray {
 }
 
 impl ksni::Tray for Tray {
-    // Left-click calls `activate()` (opens the VPN Manager window); right-click
-    // shows the menu (host-handled). Leaving this false is what splits the two
-    // buttons — setting it true would route left-click to the menu as well.
-    const MENU_ON_ACTIVATE: bool = false;
+    // Route left-click to the menu too, so it behaves the same as right-click
+    // (ItemIsMenu). Hosts that honour it won't call `activate()`; the one below
+    // stays as a fallback for hosts that ignore the hint.
+    const MENU_ON_ACTIVATE: bool = true;
 
     fn id(&self) -> String {
         "vpncbar".into()
@@ -64,7 +64,9 @@ impl ksni::Tray for Tray {
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
-        // Primary (left) click: open the VPN Manager window.
+        // Fallback only: with MENU_ON_ACTIVATE, hosts that honour ItemIsMenu show
+        // the menu on left-click and never call this. Hosts that ignore it land
+        // here — open the VPN Manager window rather than doing nothing.
         Self::send(&self.tx, Cmd::OpenWindow);
     }
 

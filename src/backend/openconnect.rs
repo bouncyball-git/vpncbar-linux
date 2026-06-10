@@ -98,14 +98,23 @@ pub fn connect(p: &Profile, otp: Option<&str>) -> ActionResult {
     ))
 }
 
+/// Outcome of a group probe: the groups (empty on failure) plus, when the gateway
+/// presented an untrusted cert and no pin was supplied, the pin-sha256 fingerprint
+/// openconnect reported — so the caller can offer trust-on-first-use pinning.
+pub struct GroupProbe {
+    pub groups: Vec<(String, bool)>,
+    pub cert_pin: Option<String>,
+}
+
 /// Fetch the gateway's group list AND each group's 2FA flag in ONE probe. The
 /// 2FA requirement is encoded as second-auth="1" on the group's <option>;
 /// openconnect's --authgroup matches the option's LABEL, so that's what we
-/// store/use. No credentials needed (no tunnel, no root). [] on failure.
-pub fn group_list(server: &str, server_cert: Option<&str>) -> Vec<(String, bool)> {
-    let Some(oc) = openconnect_path() else { return vec![] };
+/// store/use. No credentials needed (no tunnel, no root). Empty on failure.
+pub fn group_list(server: &str, server_cert: Option<&str>) -> GroupProbe {
+    let empty = || GroupProbe { groups: vec![], cert_pin: None };
+    let Some(oc) = openconnect_path() else { return empty() };
     if server.is_empty() {
-        return vec![];
+        return empty();
     }
     let mut args: Vec<String> = vec![
         "--protocol=anyconnect".into(),
@@ -132,7 +141,28 @@ pub fn group_list(server: &str, server_cert: Option<&str>) -> Vec<(String, bool)
             result.push((label.to_string(), attrs.to_lowercase().contains("second-auth=\"1\"")));
         }
     });
-    result
+
+    // No groups + no pin supplied: if the gateway's cert wasn't trusted,
+    // openconnect prints the pin-sha256 fingerprint. Surface it for TOFU pinning.
+    let cert_pin = if result.is_empty() && ne(server_cert).is_none() {
+        extract_cert_pin(&out)
+    } else {
+        None
+    };
+    GroupProbe { groups: result, cert_pin }
+}
+
+/// First `pin-sha256:<base64>` fingerprint in openconnect's output (the value it
+/// suggests for --servercert when it rejects an untrusted gateway cert), or None.
+fn extract_cert_pin(text: &str) -> Option<String> {
+    const TAG: &str = "pin-sha256:";
+    let start = text.find(TAG)?;
+    let rest = &text[start + TAG.len()..];
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='))
+        .unwrap_or(rest.len());
+    let b64 = &rest[..end];
+    (!b64.is_empty()).then(|| format!("{TAG}{b64}"))
 }
 
 /// Invoke `f(attrs, label)` for each `<option ATTRS>LABEL</option>` in `text`.

@@ -197,8 +197,14 @@ mod cli {
             },
             "groups" => match args.get(2) {
                 Some(server) => {
-                    for (g, otp) in backend::openconnect::group_list(server, args.get(3).map(String::as_str)) {
-                        println!("{g}{}", if otp { "  (2FA)" } else { "" });
+                    let probe = backend::openconnect::group_list(server, args.get(3).map(String::as_str));
+                    for (g, otp) in &probe.groups {
+                        println!("{g}{}", if *otp { "  (2FA)" } else { "" });
+                    }
+                    // TOFU: the gateway's cert isn't trusted. Print the pin so the
+                    // user can re-run with it (e.g. `vpncbar groups <server> <pin>`).
+                    if let Some(pin) = probe.cert_pin {
+                        eprintln!("untrusted gateway cert; to trust + pin it, re-run with:\n  {pin}");
                     }
                 }
                 None => eprintln!("usage: vpncbar groups <server> [servercert-pin]"),

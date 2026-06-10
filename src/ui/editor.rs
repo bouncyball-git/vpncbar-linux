@@ -597,16 +597,47 @@ impl Editor {
 
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
-            let groups = crate::backend::openconnect::group_list(&server, cert.as_deref());
-            let _ = tx.send_blocking(groups);
+            let probe = crate::backend::openconnect::group_list(&server, cert.as_deref());
+            let _ = tx.send_blocking(probe);
         });
 
         let ed = self.clone();
         glib::spawn_future_local(async move {
-            let groups = rx.recv().await.unwrap_or_default();
+            let Ok(probe) = rx.recv().await else { return };
             ed.fields.oc_fetch.set_label("Fetch groups");
             ed.fields.oc_fetch.set_sensitive(true);
 
+            // Trust-on-first-use: the gateway presented an untrusted cert and no
+            // pin is set. Show the fingerprint; on consent, pin it and retry — the
+            // pin is enforced on every connection thereafter (warned if it changes).
+            if let Some(pin) = probe.cert_pin {
+                let ed2 = ed.clone();
+                let pin2 = pin.clone();
+                gtk::AlertDialog::builder()
+                    .modal(true)
+                    .message("Untrusted server certificate")
+                    .detail(format!(
+                        "The gateway “{}” presented a certificate that isn't trusted \
+                         (self-signed, or from a private CA).\n\nFingerprint:\n{pin}\n\n\
+                         Trust and pin this certificate? It's saved to the profile and \
+                         required on every future connection — you'll be warned if it \
+                         ever changes.",
+                        ed.fields.gateway.text().trim()
+                    ))
+                    .buttons(["Cancel", "Trust & Pin"])
+                    .cancel_button(0)
+                    .default_button(1)
+                    .build()
+                    .choose(Some(&ed.window), gtk::gio::Cancellable::NONE, move |res| {
+                        if matches!(res, Ok(1)) {
+                            ed2.fields.oc_server_cert.set_text(&pin2);
+                            ed2.fetch_groups(); // retry — the pin now lets the probe through
+                        }
+                    });
+                return;
+            }
+
+            let groups = probe.groups;
             let combo = &ed.fields.oc_authgroup;
             let current = combo.active_text().map(|s| s.to_string());
             combo.remove_all();
