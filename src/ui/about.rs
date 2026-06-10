@@ -23,15 +23,6 @@ pub fn show(parent: &gtk::Window, app: &Rc<App>) {
     vb.set_margin_start(20);
     vb.set_margin_end(20);
 
-    // The closed-lock application icon, rendered from the bundled SVG so it
-    // shows even when running uninstalled (falls back to the themed name).
-    let logo = match crate::tray_icon::closed_lock_texture(64, (0.92, 0.92, 0.92)) {
-        Some(tex) => gtk::Image::from_paintable(Some(&tex)),
-        None => gtk::Image::from_icon_name("io.github.vpncbar"),
-    };
-    logo.set_pixel_size(64);
-    vb.append(&logo);
-
     let name = gtk::Label::new(None);
     name.set_markup("<span size='x-large' weight='bold'>VpncBar</span>");
     vb.append(&name);
