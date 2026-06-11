@@ -1,4 +1,4 @@
-# VpncBar (Linux / Wayland)
+# VpncBar (Linux)
 
 A native **GTK4 + StatusNotifierItem** tray front-end for two VPN backends, ported
 from the macOS VpncBar:
@@ -10,7 +10,8 @@ from the macOS VpncBar:
 It lives in the system tray, manages profiles, stores secrets in the **Secret
 Service** (GNOME Keyring / KWallet), and brings tunnels up and down with a click.
 Unlike the macOS build it does **not** vendor `vpnc` — it uses your distro's
-`vpnc`/`openconnect` and the native `tun` driver.
+`vpnc`/`openconnect` and the native `tun` driver. It runs on both **X11** and
+**Wayland**.
 
 ## How it differs from the macOS version
 
@@ -25,11 +26,12 @@ Unlike the macOS build it does **not** vendor `vpnc` — it uses your distro's
 | VPN backends | vendored static `vpnc` | distro `vpnc` / `openconnect` |
 | Scoped DNS | scutil `State:/Network` | systemd-resolved via the vpnc-script |
 
-> **Wayland note:** the tray uses the StatusNotifierItem spec. It works natively on
+> **Tray note:** the tray uses the StatusNotifierItem spec. It works natively on
 > **KDE Plasma** and on **Sway/Hyprland via Waybar**; on **GNOME** you need the
-> *AppIndicator and KStatusNotifierItem Support* extension. Wayland does not let a
-> client position a popup at the tray icon, which is why the rich list is a normal
-> window rather than a drop-down menu.
+> *AppIndicator and KStatusNotifierItem Support* extension. The rich list is a
+> normal window rather than a drop-down menu (under Wayland a client can't
+> position a popup at the tray icon, so a window is used everywhere for
+> consistency).
 
 ## Requirements
 
@@ -37,6 +39,9 @@ Unlike the macOS build it does **not** vendor `vpnc` — it uses your distro's
 - **GTK 4**, **libdbus** (build + run).
 - **vpnc** (Cisco IPSec). **openconnect** only for AnyConnect profiles.
 - **polkit** (`pkexec`) and a **Secret Service** provider (gnome-keyring or KWallet).
+- *Optional (build):* **`upx`** to shrink the release binary (skipped if absent);
+  the **`lld`** linker, which Arch's `rust` package already pulls in — install it
+  separately only if you build with `rustup`.
 
 On Arch/Manjaro:
 
