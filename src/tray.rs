@@ -8,7 +8,7 @@
 
 use crate::app::Cmd;
 use crate::tunnel::format_elapsed;
-use ksni::menu::{CheckmarkItem, MenuItem, StandardItem};
+use ksni::menu::{MenuItem, StandardItem};
 use std::collections::HashMap;
 
 pub struct Tray {
@@ -105,12 +105,14 @@ impl ksni::Tray for Tray {
                 .into(),
             );
         } else {
-            // Use CheckmarkItem so the HOST draws the connected tick in its own
-            // gutter column (left of the label). That keeps every VPN name
-            // vertically aligned — checked or not — and aligned with the other
-            // menu entries, which a text "✓ " prefix can't do (it's part of the
-            // label, and the glyph isn't the same width as the spaces we'd pad
-            // unchecked rows with). The label carries only the name + elapsed.
+            // Show the connected tick as the item's ICON (a themed checkmark in
+            // the host's gutter), NOT a CheckmarkItem. A checkmark item makes KDE
+            // optimistically toggle the box on click; when the async connect then
+            // fails or its OTP is cancelled, the box stays ticked with no model
+            // change for us to push back — so it desyncs from reality. An icon has
+            // no toggle semantics: it's drawn purely from our `connected` snapshot,
+            // so it's always correct. The gutter still aligns every name (the host
+            // reserves the icon column menu-wide).
             for name in &self.profiles {
                 let live = self.connected.get(name).copied();
                 let label = match live {
@@ -119,9 +121,9 @@ impl ksni::Tray for Tray {
                 };
                 let n = name.clone();
                 items.push(
-                    CheckmarkItem {
+                    StandardItem {
                         label,
-                        checked: live.is_some(),
+                        icon_name: if live.is_some() { "checkmark".into() } else { String::new() },
                         activate: Box::new(move |t: &mut Self| {
                             let connected = t.connected.contains_key(&n);
                             let cmd = if connected {
