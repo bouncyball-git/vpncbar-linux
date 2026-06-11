@@ -5,6 +5,25 @@
 set -e
 cd "$(dirname "$0")"
 
+# Compress a release binary with UPX when it's available. Skips cleanly if upx
+# isn't installed or the binary is already packed. UPX only shrinks the app
+# binary itself (the GTK stack is external shared libs, untouched) and the
+# binary is decompressed into RAM at startup — so this is a size-only win, and a
+# silent no-op on systems without upx.
+maybe_upx() {
+    bin=$1
+    if ! command -v upx >/dev/null 2>&1; then
+        echo "==> upx not installed — skipping compression"
+        return 0
+    fi
+    if upx -l "$bin" >/dev/null 2>&1; then
+        echo "==> $bin already UPX-packed — skipping"
+        return 0
+    fi
+    echo "==> Compressing $bin with UPX"
+    upx -q --best --lzma "$bin" >/dev/null
+}
+
 # packaging/arch is fully GENERATED here (and gitignored), so `./build.sh pkg`
 # always works even after a `git clean`. Edit this function, not the output.
 # pkgver comes from Cargo.toml — single place to bump the version.
@@ -30,7 +49,9 @@ makedepends=('rust')
 install=vpncbar.install
 # Local-tree build: no remote sources; Cargo.lock pins the crates.
 source=()
-options=('!debug')
+# !strip: cargo already strips (profile.release strip=true), and if we UPX the
+# binary below, makepkg's own strip pass would corrupt the packed binary.
+options=('!debug' '!strip')
 
 _repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
@@ -42,6 +63,12 @@ build() {
 package() {
     cd "$_repo"
     install -Dm755 target/release/vpncbar           "$pkgdir/usr/bin/vpncbar"
+    # Compress the packaged binary with UPX when available (skipped otherwise).
+    # Runs on the staged copy, not cargo's output; !strip above keeps makepkg
+    # from re-stripping (and corrupting) the packed binary.
+    if command -v upx >/dev/null 2>&1; then
+        upx -q --best --lzma "$pkgdir/usr/bin/vpncbar" >/dev/null
+    fi
     install -Dm755 packaging/vpncbar-setup          "$pkgdir/usr/bin/vpncbar-setup"
     install -Dm755 packaging/vpncbar-script         "$pkgdir/usr/lib/vpncbar/vpncbar-script"
     install -Dm755 packaging/vpncbar-disconnect     "$pkgdir/usr/lib/vpncbar/vpncbar-disconnect"
@@ -213,6 +240,7 @@ fi
 echo "==> Building $PROFILE binary"
 if [ "$PROFILE" = release ]; then
     cargo build --release
+    maybe_upx target/release/vpncbar
 else
     cargo build
 fi

@@ -6,10 +6,11 @@
 //! write it to the per-profile log for the Debug tab.
 
 use super::{script_invocation, ActionResult};
-use crate::model::{boot_log_file, ne, pid_file, split_domain_user, Profile};
+use crate::model::{boot_log_file, log_file, ne, pid_file, split_domain_user, Profile};
 use crate::privilege::{self, was_dismissed};
 use crate::secrets;
 use crate::sys::{resolve_gateway_ip, VPNC};
+use crate::tunnel::connected_tunnels;
 
 /// Build the vpnc.conf text fed to vpnc on stdin (with secrets inlined). Secrets
 /// are read from the Secret Service; never written to disk.
@@ -92,7 +93,10 @@ pub fn build_config(p: &Profile) -> Result<String, ActionResult> {
 pub fn connect(p: &Profile) -> ActionResult {
     let config = match build_config(p) {
         Ok(c) => c,
-        Err(e) => return e,
+        // build_config only ever fails with a Message; persist it so the cause
+        // (e.g. a missing group secret) shows up in the Debug tab too.
+        Err(ActionResult::Message(m)) => return report_failure(p, m),
+        Err(other) => return other,
     };
 
     let log = boot_log_file(p);
@@ -114,16 +118,48 @@ pub fn connect(p: &Profile) -> ActionResult {
         &log,
     );
 
-    if r.ok() {
-        return ActionResult::Ok;
+    // Judge success by whether the tunnel actually came up, NOT by vpnc's exit
+    // status: stock vpnc exits 0 on some fatal errors (e.g. a missing field), so
+    // r.ok() would report a phantom success. The daemon forks into the
+    // background as soon as the connection is established, so it appears in
+    // /proc right after the foreground process returns — poll briefly to absorb
+    // any scheduling jitter.
+    for i in 0..5 {
+        if !connected_tunnels(std::slice::from_ref(p)).is_empty() {
+            return ActionResult::Ok;
+        }
+        if i < 4 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
+
     if was_dismissed(&r) {
-        return ActionResult::Message("Authorization was cancelled.".into());
+        return report_failure(p, "Authorization was cancelled.".into());
     }
-    // `r.out` holds the log text captured before the foreground process exited.
-    let detail = crate::sys::tail_chars(&r.out, 600);
-    let detail = if detail.is_empty() { r.out.clone() } else { detail };
-    ActionResult::Message(format!("vpnc failed (status {}):\n{detail}", r.status))
+    // No tunnel came up. `r.out` holds whatever vpnc printed before exiting (the
+    // handshake/error) — surface it as the failure report.
+    let detail = r.out.trim();
+    let msg = if detail.is_empty() {
+        format!(
+            "Connection failed (vpnc exited {}) — no tunnel came up.\n\n\
+             vpnc produced no output. The gateway is likely unreachable or its \
+             hostname did not resolve.",
+            r.status
+        )
+    } else {
+        format!("Connection failed (vpnc exited {}):\n\n{detail}", r.status)
+    };
+    report_failure(p, msg)
+}
+
+/// Record a failed connect so the (disconnected) Debug tab can explain why.
+/// Stock vpnc has no `--log-file`, so its stderr only reaches the boot log,
+/// which the Debug tab doesn't read when no tunnel is live — persisting the
+/// message to the session log mirrors how the macOS app's `--log-file` already
+/// leaves the failure in the per-profile log. Returns the message for the caller.
+fn report_failure(p: &Profile, msg: String) -> ActionResult {
+    let _ = std::fs::write(log_file(p), &msg);
+    ActionResult::Message(msg)
 }
 
 /// This tunnel's runtime lines from the journal (vpnc daemonises to syslog),

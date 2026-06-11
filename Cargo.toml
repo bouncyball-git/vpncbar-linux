@@ -10,9 +10,9 @@ name = "vpncbar"
 path = "src/main.rs"
 
 [profile.release]
-strip = true        # drop the symbol table (file said "not stripped")
-lto = true          # cross-crate inlining + dead-code elimination
-codegen-units = 1   # one unit: better dedup/optimization, slower compile
+strip = true         # drop the symbol table (file said "not stripped")
+lto = "thin"         # parallel cross-crate inlining + DCE (≈ fat LTO for a GUI app)
+codegen-units = 16   # parallel codegen across cores (negligible runtime cost here)
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
