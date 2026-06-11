@@ -11,6 +11,12 @@ use crate::tunnel::format_elapsed;
 use ksni::menu::{MenuItem, StandardItem};
 use std::collections::HashMap;
 
+/// A 16×16 fully-transparent PNG used as the icon for disconnected VPN rows. It
+/// reserves the host's menu icon gutter (same width as the connected checkmark),
+/// so the rows keep a constant indentation whether a VPN is up or down — without
+/// the optimistic-toggle desync a CheckmarkItem would bring.
+const BLANK_ICON: &[u8] = include_bytes!("../packaging/blank.png");
+
 pub struct Tray {
     /// Snapshot used to render the menu; refreshed via `Handle::update`.
     pub profiles: Vec<String>,
@@ -111,10 +117,12 @@ impl ksni::Tray for Tray {
             // fails or its OTP is cancelled, the box stays ticked with no model
             // change for us to push back — so it desyncs from reality. An icon has
             // no toggle semantics: it's drawn purely from our `connected` snapshot,
-            // so it's always correct. The gutter still aligns every name (the host
-            // reserves the icon column menu-wide).
+            // so it's always correct. Disconnected rows carry a transparent icon
+            // (BLANK_ICON) so the gutter stays reserved at the same width — the
+            // names keep a constant indentation whether a VPN is up or down.
             for name in &self.profiles {
                 let live = self.connected.get(name).copied();
+                let connected = live.is_some();
                 let label = match live {
                     Some((_, secs)) => format!("{name} ({})", format_elapsed(secs)),
                     None => name.clone(),
@@ -123,7 +131,8 @@ impl ksni::Tray for Tray {
                 items.push(
                     StandardItem {
                         label,
-                        icon_name: if live.is_some() { "checkmark".into() } else { String::new() },
+                        icon_name: if connected { "checkmark".into() } else { String::new() },
+                        icon_data: if connected { Vec::new() } else { BLANK_ICON.to_vec() },
                         activate: Box::new(move |t: &mut Self| {
                             let connected = t.connected.contains_key(&n);
                             let cmd = if connected {
@@ -154,7 +163,9 @@ impl ksni::Tray for Tray {
         }
         items.push(
             StandardItem {
-                label: "VPN Manager".into(),
+                // Trailing spaces pad the right edge so the (widest) item isn't
+                // flush against the menu border — balances the left icon gutter.
+                label: "VPN Manager  ".into(),
                 activate: Box::new(|t: &mut Self| Self::send(&t.tx, Cmd::OpenWindow)),
                 ..Default::default()
             }
